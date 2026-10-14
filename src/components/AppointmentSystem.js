@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Box,
   Typography,
@@ -23,11 +23,12 @@ import {
   Tab,
   Paper,
   Chip,
-  Avatar,
   Tooltip,
   Switch,
   FormControlLabel,
+  CircularProgress,
 } from "@mui/material";
+import SuccessModal from "./SuccessModal";
 import { AdapterDateFns } from "@mui/x-date-pickers/AdapterDateFns";
 import {
   LocalizationProvider,
@@ -50,23 +51,49 @@ import {
 } from "@mui/icons-material";
 import { jsPDF } from "jspdf";
 import "jspdf-autotable";
+import {
+  paintHeader,
+  paintFooter,
+  moneyTable,
+  sectionCaption,
+  datedName,
+} from "../lib/documents";
 import { Calendar, momentLocalizer } from "react-big-calendar";
 import moment from "moment";
 import "react-big-calendar/lib/css/react-big-calendar.css";
-import emailjs from 'emailjs-com';
+import {
+  loadTable,
+  insertRow,
+  updateRow,
+  deleteRow,
+  newId,
+} from "../lib/store";
 
 const localizer = momentLocalizer(moment);
 
 const services = [
-  "Lastik Değişimi",
-  "Balans Ayarı",
-  "Rot Ayarı",
-  "Fren Bakımı",
-  "Yağ Değişimi",
-  "Genel Bakım",
+  "Tire Change",
+  "Wheel Balancing",
+  "Wheel Alignment",
+  "Brake Service",
+  "Oil Change",
+  "General Maintenance",
 ];
 
 const AppointmentSystem = () => {
+  const safeParseDate = (v) => {
+    if (!v) return null;
+    const d = v instanceof Date ? v : new Date(v);
+    return d && !Number.isNaN(d.getTime()) ? d : null;
+  };
+  const formatDateSafe = (v) => {
+    const d = safeParseDate(v);
+    return d ? d.toLocaleDateString() : '-';
+  };
+  const formatTimeSafe = (v) => {
+    const d = safeParseDate(v);
+    return d ? d.toLocaleTimeString() : '-';
+  };
   const [appointments, setAppointments] = useState([]);
   const [formData, setFormData] = useState({
     customerName: "",
@@ -88,16 +115,41 @@ const AppointmentSystem = () => {
     severity: "success",
   });
   const [tabValue, setTabValue] = useState(0);
+  const [isSaving, setIsSaving] = useState(false);
+  const [successModal, setSuccessModal] = useState({ open: false, title: '', message: '', details: [] });
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const loadedRef = useRef(false);
 
+  // Supabase-first; localStorage fallback keeps bookings working offline.
   useEffect(() => {
-    const storedAppointments = localStorage.getItem("appointments");
-    if (storedAppointments) {
-      setAppointments(JSON.parse(storedAppointments));
-    }
+    const loadAll = async () => {
+      try {
+        const remote = await loadTable("appointments");
+        if (remote !== null) {
+          setAppointments(remote);
+        } else {
+          const storedAppointments = localStorage.getItem("appointments");
+          if (storedAppointments) {
+            const parsed = JSON.parse(storedAppointments);
+            if (Array.isArray(parsed)) setAppointments(parsed);
+          }
+        }
+      } catch (e) {
+        // ignore corrupt storage
+      } finally {
+        loadedRef.current = true;
+      }
+    };
+    loadAll();
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("appointments", JSON.stringify(appointments));
+    if (!loadedRef.current) return;
+    try {
+      localStorage.setItem("appointments", JSON.stringify(appointments));
+    } catch (e) {
+      // storage unavailable
+    }
   }, [appointments]);
 
   const handleInputChange = (e) => {
@@ -115,53 +167,144 @@ const AppointmentSystem = () => {
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (editingId) {
-      const updatedAppointments = appointments.map((app) =>
-        app.id === editingId
-          ? { ...app, ...formData, status: "Güncellendi" }
-          : app
-      );
-      setAppointments(updatedAppointments);
-      setEditingId(null);
-      showSnackbar("Randevu başarıyla güncellendi", "success");
-    } else {
-      const newAppointment = {
-        id: Date.now(),
-        ...formData,
-        status: "Yeni",
-      };
-      setAppointments([...appointments, newAppointment]);
-      showSnackbar("Yeni randevu başarıyla eklendi", "success");
+    if (!formData.date || !formData.time) {
+      showSnackbar("Please select both date and time.", "error");
+      return;
     }
-    setFormData({
-      customerName: "",
-      phoneNumber: "",
-      email: "",
-      service: "",
-      date: null,
-      time: null,
-      notes: "",
-      sendReminder: false,
+    const dateObj = safeParseDate(formData.date);
+    const timeObj = safeParseDate(formData.time);
+    if (!dateObj || !timeObj) {
+      showSnackbar("Invalid date or time value.", "error");
+      return;
+    }
+    const normalizedDate = dateObj.toISOString();
+    const normalizedTime = timeObj.toISOString();
+    // Overlap check: same calendar day + same hour:minute + same service
+    const dayKey = dateObj.toDateString();
+    const timeKey = `${timeObj.getHours()}:${timeObj.getMinutes()}`;
+    const isOverlap = appointments.some((app) => {
+      if (editingId && String(app?.id) === String(editingId)) return false;
+      const appDate = safeParseDate(app.date);
+      const appTime = safeParseDate(app.time);
+      if (!appDate || !appTime) return false;
+      return (
+        app.service === formData.service &&
+        appDate.toDateString() === dayKey &&
+        `${appTime.getHours()}:${appTime.getMinutes()}` === timeKey
+      );
     });
+    if (isOverlap) {
+      showSnackbar("Overlapping appointment: same date, time and service already exists.", "error");
+      return;
+    }
+    // Past-date warning
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const apptDay = new Date(dateObj);
+    apptDay.setHours(0, 0, 0, 0);
+    const isPast = apptDay < today;
+    const payload = { ...formData, date: normalizedDate, time: normalizedTime };
+    const isEdit = Boolean(editingId);
+    const snapshot = { ...payload };
+    setIsSaving(true);
+    setTimeout(() => {
+      if (isEdit) {
+        const updated = { ...payload, status: "Updated" };
+        setAppointments((prev) =>
+          (prev || []).map((app) =>
+            String(app?.id) === String(editingId) ? { ...app, ...updated } : app
+          )
+        );
+        updateRow("appointments", editingId, updated);
+        setEditingId(null);
+        showSnackbar(
+          isPast ? "Appointment updated, but date is in the past." : "Appointment updated successfully",
+          isPast ? "warning" : "success"
+        );
+      } else {
+        const newAppointment = {
+          id: newId(),
+          ...payload,
+          status: "New",
+        };
+        setAppointments((prev) => [...(prev || []), newAppointment]);
+        insertRow("appointments", newAppointment).then((saved) => {
+          if (saved && saved.id && String(saved.id) !== String(newAppointment.id)) {
+            const savedId = saved.id;
+            setAppointments((prev) =>
+              (prev || []).map((app) =>
+                String(app?.id) === String(newAppointment.id)
+                  ? { ...app, id: savedId }
+                  : app
+              )
+            );
+          }
+        });
+        showSnackbar(
+          isPast ? "New appointment added, but date is in the past." : "New appointment added successfully",
+          isPast ? "warning" : "success"
+        );
+      }
+      setSuccessModal({
+        open: true,
+        title: isEdit ? "Appointment Updated" : "Appointment Added",
+        message: isEdit
+          ? "The appointment has been updated successfully."
+          : "The new appointment has been added successfully.",
+        details: [
+          { label: "Customer", value: snapshot.customerName || "-" },
+          { label: "Service", value: snapshot.service || "-" },
+          { label: "Date", value: dateObj.toLocaleDateString() },
+          { label: "Time", value: timeObj.toLocaleTimeString() },
+        ],
+      });
+      setIsSaving(false);
+      setFormData({
+        customerName: "",
+        phoneNumber: "",
+        email: "",
+        service: "",
+        date: null,
+        time: null,
+        notes: "",
+        sendReminder: false,
+      });
+    }, 600);
   };
 
   const handleEdit = (appointment) => {
-    setFormData(appointment);
+    setFormData({
+      ...appointment,
+      date: safeParseDate(appointment.date),
+      time: safeParseDate(appointment.time),
+    });
     setEditingId(appointment.id);
     setTabValue(0);
   };
 
   const handleDelete = (id) => {
-    setAppointments(appointments.filter((app) => app.id !== id));
-    showSnackbar("Randevu silindi", "info");
+    setConfirmDeleteId(id);
+  };
+
+  const confirmDelete = () => {
+    if (confirmDeleteId !== null) {
+      setAppointments((prev) =>
+        (prev || []).filter((app) => String(app?.id) !== String(confirmDeleteId))
+      );
+      deleteRow("appointments", confirmDeleteId);
+      showSnackbar("Appointment deleted", "info");
+    }
+    setConfirmDeleteId(null);
   };
 
   const handleComplete = (id) => {
-    const updatedAppointments = appointments.map((app) =>
-      app.id === id ? { ...app, status: "Tamamlandı" } : app
+    setAppointments((prev) =>
+      (prev || []).map((app) =>
+        String(app?.id) === String(id) ? { ...app, status: "Completed" } : app
+      )
     );
-    setAppointments(updatedAppointments);
-    showSnackbar("Randevu tamamlandı olarak işaretlendi", "success");
+    updateRow("appointments", id, { status: "Completed" });
+    showSnackbar("Appointment marked as completed", "success");
   };
 
   const handleOpenDialog = (appointment) => {
@@ -197,46 +340,83 @@ const AppointmentSystem = () => {
     : appointments;
 
   const exportToPDF = () => {
-    const doc = new jsPDF();
-    doc.autoTable({
+    const doc = new jsPDF({ orientation: "landscape" });
+    const startY = paintHeader(doc, { title: "Appointments" });
+    sectionCaption(doc, `Schedule report — ${filteredAppointments.length} appointment(s)`, startY);
+    moneyTable(doc, {
+      startY: startY + 8,
       head: [
         [
-          "Müşteri Adı",
-          "Telefon",
-          "E-posta",
-          "Hizmet",
-          "Tarih",
-          "Saat",
-          "Durum",
+          "Customer Name",
+          "Phone",
+          "Email",
+          "Service",
+          "Date",
+          "Time",
+          "Status",
         ],
       ],
-      body: appointments.map((app) => [
-        app.customerName,
-        app.phoneNumber,
-        app.email,
-        app.service,
-        new Date(app.date).toLocaleDateString(),
-        new Date(app.time).toLocaleTimeString(),
-        app.status,
-      ]),
+      body:
+        filteredAppointments.length > 0
+          ? filteredAppointments.map((app) => [
+              String(app.customerName || "—").slice(0, 28),
+              String(app.phoneNumber || "—").slice(0, 20),
+              String(app.email || "—").slice(0, 30),
+              String(app.service || "—").slice(0, 26),
+              formatDateSafe(app.date),
+              formatTimeSafe(app.time),
+              app.status || "—",
+            ])
+          : [["—", "", "", "No appointments", "", "", ""]],
     });
-    doc.save("randevular.pdf");
+    paintFooter(doc, "Appointment schedule");
+    doc.save(datedName("appointments", "pdf"));
   };
 
-  const sendReminderEmail = (appointment) => {
-    console.log(`Hatırlatma e-postası gönderildi: ${appointment.email}`);
-    showSnackbar(`Hatırlatma e-postası gönderildi: ${appointment.email}`, "success");
+  const sendReminderEmail = async (appointment) => {
+    const serviceId = process.env.REACT_APP_EMAILJS_SERVICE_ID;
+    const templateId = process.env.REACT_APP_EMAILJS_TEMPLATE_ID;
+    const userId = process.env.REACT_APP_EMAILJS_USER_ID;
+    if (!serviceId || !templateId || !userId) {
+      showSnackbar(
+        `Reminder for ${appointment.email} saved (email service not configured - set REACT_APP_EMAILJS_* in .env).`,
+        "info"
+      );
+      return;
+    }
+    try {
+      const emailjs = await import("emailjs-com");
+      const send = emailjs.send || (emailjs.default && emailjs.default.send);
+      await send(serviceId, templateId, { ...appointment }, userId);
+      showSnackbar(`Reminder email sent: ${appointment.email}`, "success");
+    } catch (e) {
+      console.error("Reminder email failed:", e);
+      showSnackbar(`Failed to send reminder to ${appointment.email}`, "error");
+    }
   };
 
-  const calendarEvents = appointments.map((app) => ({
-    id: app.id,
-    title: `${app.customerName} - ${app.service}`,
-    start: new Date(app.date + "T" + app.time),
-    end: moment(new Date(app.date + "T" + app.time))
-      .add(1, "hours")
-      .toDate(),
-    resource: app,
-  }));
+  const buildEventStart = (app) => {
+    const d = safeParseDate(app.date);
+    if (!d) return null;
+    const t = safeParseDate(app.time);
+    const start = new Date(d);
+    if (t) start.setHours(t.getHours(), t.getMinutes(), 0, 0);
+    return Number.isNaN(start.getTime()) ? null : start;
+  };
+
+  const calendarEvents = appointments
+    .map((app) => {
+      const start = buildEventStart(app);
+      if (!start) return null;
+      return {
+        id: app.id,
+        title: `${app.customerName} - ${app.service}`,
+        start,
+        end: moment(start).add(1, "hours").toDate(),
+        resource: app,
+      };
+    })
+    .filter(Boolean);
 
   return (
     <Box sx={{ maxWidth: 1200, margin: "auto", padding: 2 }}>
@@ -250,14 +430,14 @@ const AppointmentSystem = () => {
           color: "#1976d2",
         }}
       >
-        Kurumsal Randevu Yönetim Sistemi
+        Corporate Appointment Management System
       </Typography>
 
       <Paper elevation={3} sx={{ mb: 4 }}>
-        <Tabs value={tabValue} onChange={handleTabChange} centered>
-          <Tab label="Randevu Ekle/Düzenle" />
-          <Tab label="Randevu Listesi" />
-          <Tab label="Takvim Görünümü" />
+        <Tabs value={tabValue} onChange={handleTabChange} variant="scrollable" scrollButtons="auto" allowScrollButtonsMobile>
+          <Tab label="Add/Edit Appointment" />
+          <Tab label="Appointment List" />
+          <Tab label="Calendar View" />
         </Tabs>
       </Paper>
 
@@ -267,7 +447,7 @@ const AppointmentSystem = () => {
             <Grid container spacing={3}>
               <Grid item xs={12} sm={6}>
                 <TextField
-                  label="Müşteri Adı"
+                  label="Customer Name"
                   name="customerName"
                   value={formData.customerName}
                   onChange={handleInputChange}
@@ -280,7 +460,7 @@ const AppointmentSystem = () => {
               </Grid>
               <Grid item xs={12} sm={6}>
                 <TextField
-                  label="Telefon Numarası"
+                  label="Phone Number"
                   name="phoneNumber"
                   value={formData.phoneNumber}
                   onChange={handleInputChange}
@@ -293,7 +473,7 @@ const AppointmentSystem = () => {
               </Grid>
               <Grid item xs={12} sm={6}>
                 <TextField
-                  label="E-posta"
+                  label="Email"
                   name="email"
                   type="email"
                   value={formData.email}
@@ -307,7 +487,7 @@ const AppointmentSystem = () => {
               </Grid>
               <Grid item xs={12} sm={6}>
                 <FormControl fullWidth required>
-                  <InputLabel>Hizmet</InputLabel>
+                  <InputLabel>Service</InputLabel>
                   <Select
                     name="service"
                     value={formData.service}
@@ -324,46 +504,26 @@ const AppointmentSystem = () => {
               <Grid item xs={12} sm={6}>
                 <LocalizationProvider dateAdapter={AdapterDateFns}>
                   <DatePicker
-                    label="Tarih"
+                    label="Date"
                     value={formData.date}
                     onChange={handleDateChange}
-                    renderInput={(params) => (
-                      <TextField
-                        {...params}
-                        fullWidth
-                        required
-                        InputProps={{
-                          ...params.InputProps,
-                          startAdornment: <CalendarToday color="action" />,
-                        }}
-                      />
-                    )}
+                    slotProps={{ textField: { fullWidth: true, required: true } }}
                   />
                 </LocalizationProvider>
               </Grid>
               <Grid item xs={12} sm={6}>
                 <LocalizationProvider dateAdapter={AdapterDateFns}>
                   <TimePicker
-                    label="Saat"
+                    label="Time"
                     value={formData.time}
                     onChange={handleTimeChange}
-                    renderInput={(params) => (
-                      <TextField
-                        {...params}
-                        fullWidth
-                        required
-                        InputProps={{
-                          ...params.InputProps,
-                          startAdornment: <AccessTime color="action" />,
-                        }}
-                      />
-                    )}
+                    slotProps={{ textField: { fullWidth: true, required: true } }}
                   />
                 </LocalizationProvider>
               </Grid>
               <Grid item xs={12}>
                 <TextField
-                  label="Notlar"
+                  label="Notes"
                   name="notes"
                   value={formData.notes}
                   onChange={handleInputChange}
@@ -390,7 +550,7 @@ const AppointmentSystem = () => {
                       color="primary"
                     />
                   }
-                  label="Hatırlatma E-postası Gönder"
+                  label="Send Reminder Email"
                 />
               </Grid>
               <Grid item xs={12}>
@@ -399,8 +559,10 @@ const AppointmentSystem = () => {
                   variant="contained"
                   color="primary"
                   fullWidth
+                  disabled={isSaving}
+                  startIcon={isSaving ? <CircularProgress size={20} color="inherit" /> : null}
                 >
-                  {editingId ? "Randevuyu Güncelle" : "Randevu Ekle"}
+                  {isSaving ? "Saving..." : (editingId ? "Update Appointment" : "Add Appointment")}
                 </Button>
               </Grid>
             </Grid>
@@ -410,14 +572,14 @@ const AppointmentSystem = () => {
 
       {tabValue === 1 && (
         <Paper elevation={3} sx={{ p: 3 }}>
-          <Box sx={{ display: "flex", justifyContent: "space-between", mb: 3 }}>
-            <FormControl sx={{ minWidth: 200 }}>
-              <InputLabel>Durum Filtrele</InputLabel>
+          <Box sx={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 2, mb: 3 }}>
+            <FormControl sx={{ minWidth: 200, flexGrow: 1, maxWidth: { xs: "100%", sm: 300 } }}>
+              <InputLabel>Filter by Status</InputLabel>
               <Select value={filterStatus} onChange={handleStatusFilterChange}>
-                <MenuItem value="">Tümü</MenuItem>
-                <MenuItem value="Yeni">Yeni</MenuItem>
-                <MenuItem value="Güncellendi">Güncellendi</MenuItem>
-                <MenuItem value="Tamamlandı">Tamamlandı</MenuItem>
+                <MenuItem value="">All</MenuItem>
+                <MenuItem value="New">New</MenuItem>
+                <MenuItem value="Updated">Updated</MenuItem>
+                <MenuItem value="Completed">Completed</MenuItem>
               </Select>
             </FormControl>
             <Button
@@ -426,7 +588,7 @@ const AppointmentSystem = () => {
               onClick={exportToPDF}
               startIcon={<PictureAsPdf />}
             >
-              PDF İndir
+              Download PDF
             </Button>
           </Box>
 
@@ -439,12 +601,13 @@ const AppointmentSystem = () => {
                     height: "100%",
                     display: "flex",
                     flexDirection: "column",
-                    backgroundColor: "#ffffff",
+                    bgcolor: "background.paper",
+                    color: "text.primary",
                     borderLeft: 6,
                     borderColor:
-                      appointment.status === "Tamamlandı"
+                      appointment.status === "Completed"
                         ? "#4caf50"
-                        : appointment.status === "Güncellendi"
+                        : appointment.status === "Updated"
                         ? "#ff9800"
                         : "#2196f3",
                     transition:
@@ -466,16 +629,16 @@ const AppointmentSystem = () => {
                     >
                       <Typography
                         variant="h6"
-                        sx={{ fontWeight: "bold", color: "#333" }}
+                        sx={{ fontWeight: "bold", color: "text.primary" }}
                       >
                         {appointment.customerName}
                       </Typography>
                       <Chip
                         label={appointment.status}
                         color={
-                          appointment.status === "Tamamlandı"
+                          appointment.status === "Completed"
                             ? "success"
-                            : appointment.status === "Güncellendi"
+                            : appointment.status === "Updated"
                             ? "warning"
                             : "info"
                         }
@@ -525,7 +688,7 @@ const AppointmentSystem = () => {
                         fontSize="small"
                         sx={{ mr: 1, color: "#757575" }}
                       />
-                      {new Date(appointment.date).toLocaleDateString()}
+                      {formatDateSafe(appointment.date)}
                     </Typography>
                     <Typography
                       variant="body2"
@@ -535,7 +698,7 @@ const AppointmentSystem = () => {
                         fontSize="small"
                         sx={{ mr: 1, color: "#757575" }}
                       />
-                      {new Date(appointment.time).toLocaleTimeString()}
+                      {formatTimeSafe(appointment.time)}
                     </Typography>
                     {appointment.notes && (
                       <Typography
@@ -545,7 +708,7 @@ const AppointmentSystem = () => {
                           alignItems: "center",
                           mb: 1,
                           fontStyle: "italic",
-                          color: "#616161",
+                          color: "text.secondary",
                         }}
                       >
                         <Note fontSize="small" sx={{ mr: 1 }} />
@@ -556,12 +719,13 @@ const AppointmentSystem = () => {
                   <CardActions
                     sx={{
                       justifyContent: "space-between",
-                      backgroundColor: "#f5f5f5",
-                      borderTop: "1px solid #e0e0e0",
+                      bgcolor: "action.hover",
+                      borderTop: "1px solid",
+                      borderColor: "divider",
                     }}
                   >
                     <Box>
-                      <Tooltip title="Düzenle">
+                      <Tooltip title="Edit">
                         <IconButton
                           onClick={() => handleEdit(appointment)}
                           size="small"
@@ -569,7 +733,7 @@ const AppointmentSystem = () => {
                           <Edit fontSize="small" />
                         </IconButton>
                       </Tooltip>
-                      <Tooltip title="Tamamlandı olarak işaretle">
+                      <Tooltip title="Mark as completed">
                         <IconButton
                           onClick={() => handleComplete(appointment.id)}
                           size="small"
@@ -577,7 +741,7 @@ const AppointmentSystem = () => {
                           <CheckCircle fontSize="small" />
                         </IconButton>
                       </Tooltip>
-                      <Tooltip title="Sil">
+                      <Tooltip title="Delete">
                         <IconButton
                           onClick={() => handleDelete(appointment.id)}
                           size="small"
@@ -587,7 +751,7 @@ const AppointmentSystem = () => {
                       </Tooltip>
                     </Box>
                     <Box>
-                      <Tooltip title="Detaylar">
+                      <Tooltip title="Details">
                         <IconButton
                           onClick={() => handleOpenDialog(appointment)}
                           size="small"
@@ -596,7 +760,7 @@ const AppointmentSystem = () => {
                         </IconButton>
                       </Tooltip>
                       {appointment.sendReminder && (
-                        <Tooltip title="Hatırlatma E-postası Gönder">
+                        <Tooltip title="Send Reminder Email">
                           <IconButton
                             onClick={() => sendReminderEmail(appointment)}
                             size="small"
@@ -628,12 +792,28 @@ const AppointmentSystem = () => {
       )}
 
       <Dialog
+        open={confirmDeleteId !== null}
+        onClose={() => setConfirmDeleteId(null)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>Delete appointment?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">This cannot be undone.</Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmDeleteId(null)}>Cancel</Button>
+          <Button onClick={confirmDelete} color="error" variant="contained">Delete</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
         open={openDialog}
         onClose={handleCloseDialog}
         maxWidth="sm"
         fullWidth
       >
-        <DialogTitle>Randevu Detayları</DialogTitle>
+        <DialogTitle>Appointment Details</DialogTitle>
         <DialogContent>
           {selectedAppointment && (
             <Grid container spacing={2}>
@@ -644,49 +824,57 @@ const AppointmentSystem = () => {
               </Grid>
               <Grid item xs={12} sm={6}>
                 <Typography>
-                  <strong>Telefon:</strong> {selectedAppointment.phoneNumber}
+                  <strong>Phone:</strong> {selectedAppointment.phoneNumber}
                 </Typography>
               </Grid>
               <Grid item xs={12} sm={6}>
                 <Typography>
-                  <strong>E-posta:</strong> {selectedAppointment.email}
+                  <strong>Email:</strong> {selectedAppointment.email}
                 </Typography>
               </Grid>
               <Grid item xs={12} sm={6}>
                 <Typography>
-                  <strong>Hizmet:</strong> {selectedAppointment.service}
+                  <strong>Service:</strong> {selectedAppointment.service}
                 </Typography>
               </Grid>
               <Grid item xs={12} sm={6}>
                 <Typography>
-                  <strong>Tarih:</strong>{" "}
-                  {new Date(selectedAppointment.date).toLocaleDateString()}
+                  <strong>Date:</strong>{" "}
+                  {formatDateSafe(selectedAppointment.date)}
                 </Typography>
               </Grid>
               <Grid item xs={12} sm={6}>
                 <Typography>
-                  <strong>Saat:</strong>{" "}
-                  {new Date(selectedAppointment.time).toLocaleTimeString()}
+                  <strong>Time:</strong>{" "}
+                  {formatTimeSafe(selectedAppointment.time)}
                 </Typography>
               </Grid>
               <Grid item xs={12} sm={6}>
                 <Typography>
-                  <strong>Durum:</strong> {selectedAppointment.status}
+                  <strong>Status:</strong> {selectedAppointment.status}
                 </Typography>
               </Grid>
               <Grid item xs={12}>
                 <Typography>
-                  <strong>Notlar:</strong> {selectedAppointment.notes}
+                  <strong>Notes:</strong> {selectedAppointment.notes}
                 </Typography>
               </Grid>
             </Grid>
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={handleCloseDialog}>Kapat</Button>
+          <Button onClick={handleCloseDialog}>Close</Button>
         </DialogActions>
       </Dialog>
 
+      <SuccessModal
+        open={successModal.open}
+        onClose={() => setSuccessModal({ ...successModal, open: false })}
+        title={successModal.title}
+        message={successModal.message}
+        details={successModal.details}
+        actionLabel="Done"
+      />
       <Snackbar
         open={snackbar.open}
         autoHideDuration={6000}

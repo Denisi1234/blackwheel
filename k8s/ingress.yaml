@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: blackwheel-web
+  namespace: blackwheel
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    # HSTS enforced at edge; backend also sets security headers (see nginx.conf).
+    nginx.ingress.kubernetes.io/hsts: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - tires.example.com # <-- replace with real domain
+      secretName: blackwheel-tls # kubectl create secret tls blackwheel-tls --cert=... --key=...
+  rules:
+    - host: tires.example.com # <-- replace with real domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: blackwheel-web
+                port:
+                  number: 80

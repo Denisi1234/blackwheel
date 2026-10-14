@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   TextField, Button, Grid, Paper, Typography, Box, IconButton, Dialog, DialogTitle, DialogContent, DialogActions,
-  Snackbar, Alert, Chip, Tooltip, FormControlLabel, Switch, ThemeProvider, createTheme, CssBaseline,
-  Avatar, Card, CardContent, CardActions, Divider, InputAdornment, Tabs, Tab, CircularProgress, LinearProgress,
-  List, ListItem, ListItemText, ListItemAvatar, ListItemSecondaryAction, Menu, MenuItem
+  Snackbar, Alert, Chip, Tooltip, FormControlLabel, Switch, ThemeProvider, createTheme,
+  Avatar, Card, CardContent, CardActions, InputAdornment, Tabs, Tab,
+  Menu, MenuItem, CircularProgress
 } from '@mui/material';
+import SuccessModal from './SuccessModal';
 import { alpha, styled } from '@mui/material/styles';
 import { DataGrid, GridToolbar } from '@mui/x-data-grid';
 import DeleteIcon from '@mui/icons-material/Delete';
@@ -16,25 +17,36 @@ import PictureAsPdfIcon from '@mui/icons-material/PictureAsPdf';
 import SearchIcon from '@mui/icons-material/Search';
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import InventoryIcon from '@mui/icons-material/Inventory';
-import EventAvailableIcon from '@mui/icons-material/EventAvailable';
-import WarningIcon from '@mui/icons-material/Warning';
 import PersonIcon from '@mui/icons-material/Person';
-import SettingsIcon from '@mui/icons-material/Settings';
 import CalendarMonthIcon from '@mui/icons-material/CalendarMonth';
 import BarChartIcon from '@mui/icons-material/BarChart';
-import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, LineChart, Line } from 'recharts';
+import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, LineChart, Line, ResponsiveContainer } from 'recharts';
 import { Calendar, momentLocalizer } from 'react-big-calendar';
 import moment from 'moment';
 import 'react-big-calendar/lib/css/react-big-calendar.css';
 import { jsPDF } from "jspdf";
 import 'jspdf-autotable';
+import {
+  DOC_BRAND,
+  paintHeader,
+  paintFooter,
+  moneyTable,
+  sectionCaption,
+  downloadCsv,
+  datedName,
+} from "../lib/documents";
+import {
+  loadTable,
+  insertRow,
+  updateRow,
+  deleteRow,
+  newId,
+} from "../lib/store";
 
-const theme = createTheme({
-  palette: {
-    primary: { main: '#1976d2' },
-    secondary: { main: '#dc004e' },
-    background: { default: '#f4f6f8' },
-  },
+// Local component overrides only. Palette / mode come from the app-level
+// theme (see App.js) so the global dark-mode toggle applies here too — this
+// module used to force its own light palette + CssBaseline.
+const hotelThemeOverrides = {
   typography: {
     fontFamily: 'Roboto, "Helvetica Neue", Arial, sans-serif',
     h4: { fontWeight: 700 },
@@ -68,7 +80,8 @@ const theme = createTheme({
       },
     },
   },
-});
+};
+const extendAppTheme = (outerTheme) => createTheme(outerTheme, hotelThemeOverrides);
 
 const StyledDataGrid = styled(DataGrid)(({ theme }) => ({
   border: 0,
@@ -127,48 +140,89 @@ function TireHotel() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
+  const [isSaving, setIsSaving] = useState(false);
+  const [successModal, setSuccessModal] = useState({ open: false, title: '', message: '', details: [] });
   const [showExpiredOnly, setShowExpiredOnly] = useState(false);
   const [activeTab, setActiveTab] = useState(0);
   const [events, setEvents] = useState([]);
   const [anchorEl, setAnchorEl] = useState(null);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
+  const [paginationModel, setPaginationModel] = useState({ page: 0, pageSize: 10 });
+  const [isCustomerDialogOpen, setIsCustomerDialogOpen] = useState(false);
+  const [editingCustomer, setEditingCustomer] = useState(null);
+  const [customerForm, setCustomerForm] = useState({ name: '', email: '', phone: '' });
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const loadedRef = useRef(false);
 
+  const safeParse = (key) => {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : null;
+    } catch (e) {
+      return null;
+    }
+  };
+
+  // Supabase-first; localStorage fallback keeps the hotel working offline.
+  // No mock seeds — a fresh shop starts empty and stays in sync.
   useEffect(() => {
-    const fetchData = async () => {
-      // Simulate API calls
-      const mockTires = [
-        { id: 1, customerName: 'John Doe', brand: 'Michelin', size: '205/55R16', quantity: 4, storageDate: '2023-01-01', retrievalDate: '2023-12-31', notes: 'Winter tires', retrieved: false, plateNumber: '34ABC123', vehicleModel: 'Toyota Corolla' },
-        { id: 2, customerName: 'Jane Smith', brand: 'Goodyear', size: '225/45R17', quantity: 4, storageDate: '2023-02-15', retrievalDate: '2023-11-30', notes: 'Summer tires', retrieved: false, plateNumber: '34XYZ789', vehicleModel: 'Ford Focus' },
-        { id: 3, customerName: 'Bob Johnson', brand: 'Continental', size: '195/65R15', quantity: 4, storageDate: '2023-03-10', retrievalDate: '2023-10-31', notes: 'All-season tires', retrieved: false, plateNumber: '34DEF456', vehicleModel: 'Honda Civic' },
-        { id: 4, customerName: 'Alice Brown', brand: 'Pirelli', size: '235/40R18', quantity: 4, storageDate: '2023-04-05', retrievalDate: '2023-09-30', notes: 'Performance tires', retrieved: false, plateNumber: '34GHI789', vehicleModel: 'BMW 3 Series' },
-        { id: 5, customerName: 'Charlie Davis', brand: 'Bridgestone', size: '215/60R16', quantity: 4, storageDate: '2023-05-20', retrievalDate: '2023-11-15', notes: 'SUV tires', retrieved: false, plateNumber: '34JKL012', vehicleModel: 'Nissan Qashqai' },
-      ];
-      setHotelTires(mockTires);
-
-      const mockCustomers = [
-        { id: 1, name: 'John Doe', email: 'john@example.com', phone: '555-1234' },
-        { id: 2, name: 'Jane Smith', email: 'jane@example.com', phone: '555-5678' },
-        { id: 3, name: 'Bob Johnson', email: 'bob@example.com', phone: '555-9012' },
-        { id: 4, name: 'Alice Brown', email: 'alice@example.com', phone: '555-3456' },
-        { id: 5, name: 'Charlie Davis', email: 'charlie@example.com', phone: '555-7890' },
-      ];
-      setCustomers(mockCustomers);
+    const loadAll = async () => {
+      try {
+        const [remoteTires, remoteCustomers] = await Promise.all([
+          loadTable("hotelTires"),
+          loadTable("hotelCustomers"),
+        ]);
+        setHotelTires(
+          remoteTires !== null ? remoteTires : safeParse("hotelTires") || []
+        );
+        setCustomers(
+          remoteCustomers !== null ? remoteCustomers : safeParse("hotelCustomers") || []
+        );
+      } catch (e) {
+        setHotelTires(safeParse("hotelTires") || []);
+        setCustomers(safeParse("hotelCustomers") || []);
+      } finally {
+        loadedRef.current = true;
+      }
     };
-    fetchData();
+    loadAll();
   }, []);
 
   useEffect(() => {
-    const tireEvents = hotelTires.map(tire => ({
-      title: `${tire.customerName} - ${tire.brand}`,
-      start: new Date(tire.storageDate),
-      end: new Date(tire.retrievalDate),
-      resource: tire,
-    }));
-    setEvents(tireEvents);
+    if (!loadedRef.current) return;
+    try {
+      localStorage.setItem('hotelTires', JSON.stringify(hotelTires));
+    } catch (e) {
+      // storage unavailable
+    }
   }, [hotelTires]);
 
   useEffect(() => {
-    checkExpiredTires();
+    if (!loadedRef.current) return;
+    try {
+      localStorage.setItem('hotelCustomers', JSON.stringify(customers));
+    } catch (e) {
+      // storage unavailable
+    }
+  }, [customers]);
+
+  useEffect(() => {
+    const tireEvents = hotelTires
+      .filter((tire) => tire.storageDate && !Number.isNaN(new Date(tire.storageDate).getTime()))
+      .map(tire => {
+        const start = new Date(tire.storageDate);
+        const endCandidate = tire.retrievalDate ? new Date(tire.retrievalDate) : null;
+        const end = endCandidate && !Number.isNaN(endCandidate.getTime()) ? endCandidate : start;
+        return {
+          title: `${tire.customerName} - ${tire.brand}`,
+          start,
+          end,
+          resource: tire,
+        };
+      });
+    setEvents(tireEvents);
   }, [hotelTires]);
 
   const checkExpiredTires = useCallback(() => {
@@ -179,11 +233,15 @@ function TireHotel() {
     if (expiredTires.length > 0) {
       setSnackbar({
         open: true,
-        message: `${expiredTires.length} lastik(ler) için alınma tarihi geçti!`,
+        message: `${expiredTires.length} tire(s) past retrieval date!`,
         severity: 'warning'
       });
     }
   }, [hotelTires]);
+
+  useEffect(() => {
+    checkExpiredTires();
+  }, [checkExpiredTires]);
 
   const handleChange = (e) => {
     setNewTire({ ...newTire, [e.target.name]: e.target.value });
@@ -200,36 +258,84 @@ function TireHotel() {
     }
   };
 
+  const matchCustomerId = useCallback((name, list) => {
+    const clean = String(name || "").trim().toLowerCase();
+    if (!clean) return "";
+    const found = (list || customers || []).find(
+      (c) => String(c?.name || "").trim().toLowerCase() === clean
+    );
+    return found ? found.id : "";
+  }, [customers]);
+
   const addHotelTire = useCallback((tire) => {
-    const newId = Math.max(...hotelTires.map(t => t.id), 0) + 1;
-    setHotelTires(prevTires => [...prevTires, { ...tire, id: newId }]);
-  }, [hotelTires]);
+    const record = {
+      ...tire,
+      id: tire?.id ?? newId(),
+      retrieved: Boolean(tire?.retrieved),
+      quantity: Number(tire?.quantity) || 4,
+    };
+    if (!record.customerId) {
+      record.customerId = matchCustomerId(record.customerName);
+    }
+    setHotelTires(prevTires => [...prevTires, record]);
+    insertRow("hotelTires", record).then((saved) => {
+      if (saved && saved.id && String(saved.id) !== String(record.id)) {
+        const savedId = saved.id;
+        setHotelTires((prev) =>
+          (prev || []).map((t) =>
+            String(t?.id) === String(record.id) ? { ...t, id: savedId } : t
+          )
+        );
+      }
+    });
+    return record.id;
+  }, [matchCustomerId]);
 
   const updateHotelTire = useCallback((id, updatedTire) => {
-    setHotelTires(prevTires => 
-      prevTires.map(tire => tire.id === id ? { ...tire, ...updatedTire } : tire)
+    setHotelTires(prevTires =>
+      prevTires.map(tire => String(tire?.id) === String(id) ? { ...tire, ...updatedTire } : tire)
     );
+    updateRow("hotelTires", id, updatedTire);
   }, []);
 
   const removeHotelTire = useCallback((id) => {
-    setHotelTires(prevTires => prevTires.filter(tire => tire.id !== id));
+    setHotelTires(prevTires => prevTires.filter(tire => String(tire?.id) !== String(id)));
+    deleteRow("hotelTires", id);
   }, []);
 
   const handleSubmit = (e) => {
     e.preventDefault();
+    setIsSaving(true);
+    const isEdit = Boolean(editingTire);
+    const snapshot = { ...newTire };
     const tireWithDates = {
-      ...newTire,
-      storageDate: newTire.storageDate ? new Date(newTire.storageDate).toISOString() : null,
-      retrievalDate: newTire.retrievalDate ? new Date(newTire.retrievalDate).toISOString() : null
+      ...snapshot,
+      quantity: Number(snapshot.quantity) || 0,
+      storageDate: snapshot.storageDate ? new Date(snapshot.storageDate).toISOString() : '',
+      retrievalDate: snapshot.retrievalDate ? new Date(snapshot.retrievalDate).toISOString() : ''
     };
-    if (editingTire) {
-      updateHotelTire(editingTire.id, tireWithDates);
-      setSnackbar({ open: true, message: 'Lastik başarıyla güncellendi', severity: 'success' });
-    } else {
-      addHotelTire(tireWithDates);
-      setSnackbar({ open: true, message: 'Yeni lastik başarıyla eklendi', severity: 'success' });
-    }
-    resetForm();
+    setTimeout(() => {
+      if (isEdit) {
+        updateHotelTire(editingTire.id, tireWithDates);
+        setSnackbar({ open: true, message: 'Tire updated successfully', severity: 'success' });
+      } else {
+        addHotelTire(tireWithDates);
+        setSnackbar({ open: true, message: 'New tire added successfully', severity: 'success' });
+      }
+      setSuccessModal({
+        open: true,
+        title: isEdit ? 'Tire Updated' : 'Tire Added',
+        message: isEdit ? 'The tire record has been updated successfully.' : 'The new tire has been added to the hotel successfully.',
+        details: [
+          { label: 'Customer', value: snapshot.customerName || '-' },
+          { label: 'Brand', value: snapshot.brand || '-' },
+          { label: 'Size', value: snapshot.size || '-' },
+          { label: 'Plate', value: snapshot.plateNumber || '-' },
+        ],
+      });
+      resetForm();
+      setIsSaving(false);
+    }, 600);
   };
 
   const resetForm = () => {
@@ -244,48 +350,56 @@ function TireHotel() {
 
   const handleEdit = (tire) => {
     setEditingTire(tire);
+    const toInputDate = (v) => {
+      if (!v) return '';
+      const d = new Date(v);
+      if (Number.isNaN(d.getTime())) return '';
+      return d.toISOString().split('T')[0];
+    };
     setNewTire({
       ...tire,
-      storageDate: tire.storageDate ? new Date(tire.storageDate).toISOString().split('T')[0] : '',
-      retrievalDate: tire.retrievalDate ? new Date(tire.retrievalDate).toISOString().split('T')[0] : ''
+      storageDate: toInputDate(tire.storageDate),
+      retrievalDate: toInputDate(tire.retrievalDate)
     });
     setIsDialogOpen(true);
   };
 
   const handleDelete = (id) => {
     removeHotelTire(id);
-    setSnackbar({ open: true, message: 'Lastik başarıyla silindi', severity: 'success' });
+    setSnackbar({ open: true, message: 'Tire deleted successfully', severity: 'success' });
   };
 
   const handleRetrieve = (id) => {
-    const tire = hotelTires.find(t => t.id === id);
+    const tire = hotelTires.find(t => String(t?.id) === String(id));
     if (tire) {
       const updatedTire = { ...tire, retrievalDate: new Date().toISOString(), retrieved: true };
       updateHotelTire(id, updatedTire);
-      setSnackbar({ open: true, message: 'Lastik teslim edildi', severity: 'info' });
+      setSnackbar({ open: true, message: 'Tire delivered', severity: 'info' });
     }
   };
 
   const filteredTires = useMemo(() => {
+    const term = (searchTerm || '').toLowerCase();
     return hotelTires.filter(tire =>
-      (tire.customerName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      tire.brand.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      tire.size.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      tire.plateNumber.toLowerCase().includes(searchTerm.toLowerCase())) &&
-      (!showExpiredOnly || (tire.retrievalDate && new Date(tire.retrievalDate) < new Date() && !tire.retrieved))
+      ((tire.customerName?.toLowerCase() || '').includes(term) ||
+      (tire.brand?.toLowerCase() || '').includes(term) ||
+      (tire.size?.toLowerCase() || '').includes(term) ||
+      (tire.plateNumber?.toLowerCase() || '').includes(term)) &&
+      (!showExpiredOnly || (tire.retrievalDate && !Number.isNaN(new Date(tire.retrievalDate).getTime()) && new Date(tire.retrievalDate) < new Date() && !tire.retrieved))
     );
   }, [hotelTires, searchTerm, showExpiredOnly]);
 
   const formatDate = (dateString) => {
     if (!dateString) return '';
     const date = new Date(dateString);
+    if (Number.isNaN(date.getTime())) return '';
     return date.toLocaleDateString();
   };
 
   const columns = [
     {
       field: 'photo',
-      headerName: 'Fotoğraf',
+      headerName: 'Photo',
       width: 100,
       renderCell: (params) => (
         <Avatar
@@ -293,23 +407,23 @@ function TireHotel() {
           variant="rounded"
           sx={{ width: 60, height: 60 }}
         >
-          {params.row.brand[0]}
+          {(params.row.brand || '?')[0]}
         </Avatar>
       ),
     },
-    { field: 'customerName', headerName: 'Müşteri Adı', width: 150 },
-    { field: 'plateNumber', headerName: 'Plaka', width: 120 },
-    { field: 'vehicleModel', headerName: 'Araç Modeli', width: 150 },
-    { field: 'brand', headerName: 'Marka', width: 120 },
-    { field: 'size', headerName: 'Ebat', width: 120 },
-    { field: 'quantity', headerName: 'Adet', width: 80, type: 'number' },
+    { field: 'customerName', headerName: 'Customer Name', width: 150 },
+    { field: 'plateNumber', headerName: 'License Plate', width: 120 },
+    { field: 'vehicleModel', headerName: 'Vehicle Model', width: 150 },
+    { field: 'brand', headerName: 'Brand', width: 120 },
+    { field: 'size', headerName: 'Size', width: 120 },
+    { field: 'quantity', headerName: 'Quantity', width: 80, type: 'number' },
     {
       field: 'status',
-      headerName: 'Durum',
+      headerName: 'Status',
       width: 120,
       renderCell: (params) => (
         <Chip
-          label={params.row.retrieved ? 'Teslim Edildi' : 'Depoda'}
+          label={params.row.retrieved ? 'Delivered' : 'In Storage'}
           color={params.row.retrieved ? 'success' : 'primary'}
           icon={params.row.retrieved ? <LocalShippingIcon /> : <InventoryIcon />}
         />
@@ -317,45 +431,45 @@ function TireHotel() {
     },
     {
       field: 'storageDate',
-      headerName: 'Depolama Tarihi',
+      headerName: 'Storage Date',
       width: 130,
       valueFormatter: (params) => formatDate(params.value),
     },
     {
       field: 'retrievalDate',
-      headerName: 'Alınma Tarihi',
+      headerName: 'Retrieval Date',
       width: 130,
       valueFormatter: (params) => formatDate(params.value),
     },
     {
       field: 'actions',
-      headerName: 'İşlemler',
+      headerName: 'Actions',
       width: 300,
       renderCell: (params) => (
         <Box>
-          <Tooltip title="Düzenle">
+          <Tooltip title="Edit">
             <IconButton onClick={() => handleEdit(params.row)}>
               <EditIcon />
             </IconButton>
           </Tooltip>
-          <Tooltip title="Sil">
+          <Tooltip title="Delete">
             <IconButton onClick={() => handleDelete(params.row.id)}>
               <DeleteIcon />
             </IconButton>
           </Tooltip>
           {!params.row.retrieved && (
-            <Tooltip title="Teslim Et">
+            <Tooltip title="Deliver">
               <Button variant="outlined" size="small" onClick={() => handleRetrieve(params.row.id)}>
-                Teslim Et
+                Deliver
               </Button>
             </Tooltip>
           )}
-          <Tooltip title="Depo Fişi Yazdır">
+          <Tooltip title="Print Storage Slip">
             <IconButton onClick={() => generateStorageSlip(params.row)}>
               <PrintIcon />
             </IconButton>
           </Tooltip>
-          <Tooltip title="Otel Fişi Oluştur">
+          <Tooltip title="Generate Hotel Receipt">
             <IconButton onClick={() => generateHotelReceipt(params.row)}>
               <PictureAsPdfIcon />
             </IconButton>
@@ -372,58 +486,94 @@ function TireHotel() {
     const margin = 10;
     const slipWidth = (pageWidth - 3 * margin) / 2;
     const slipHeight = (pageHeight - 3 * margin) / 2;
-  
+
     const createSlip = (x, y) => {
+      doc.setDrawColor(...DOC_BRAND.line);
       doc.rect(x, y, slipWidth, slipHeight);
-      doc.setFontSize(12);
-      doc.text("Lastik Oteli Depo Fişi", x + 5, y + 10);
+      doc.setFillColor(...DOC_BRAND.primary);
+      doc.rect(x, y, slipWidth, 14, "F");
+      doc.setTextColor(255, 255, 255);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(11);
+      doc.text("Tire Hotel Storage Slip", x + 5, y + 9);
+      doc.setTextColor(15, 23, 42);
+      doc.setFont("helvetica", "normal");
       doc.setFontSize(10);
-      doc.text(`Plaka: ${tire.plateNumber}`, x + 5, y + 20);
-      doc.text(`Tarih: ${formatDate(tire.storageDate)}`, x + 5, y + 30);
-      doc.text(`Marka: ${tire.brand}`, x + 5, y + 40);
-      doc.text(`Ebat: ${tire.size}`, x + 5, y + 50);
-      doc.text(`Not: ${tire.notes}`, x + 5, y + 60);
+      const lines = [
+        `Customer: ${tire.customerName || "—"}`,
+        `License Plate: ${tire.plateNumber || "—"}`,
+        `Date: ${formatDate(tire.storageDate)}`,
+        `Brand: ${tire.brand || "—"}  ·  Size: ${tire.size || "—"}  ·  Qty: ${tire.quantity ?? ""}`,
+        `Retrieval: ${formatDate(tire.retrievalDate) || "—"}`,
+        `Note: ${String(tire.notes || "—").slice(0, 60)}`,
+      ];
+      lines.forEach((line, i) => doc.text(line, x + 5, y + 24 + i * 8, { maxWidth: slipWidth - 10 }));
+      doc.setFontSize(8);
+      doc.setTextColor(...DOC_BRAND.muted);
+      doc.text("Keep this slip — present it at pickup.", x + 5, y + slipHeight - 6);
     };
-  
+
     createSlip(margin, margin);
     createSlip(margin * 2 + slipWidth, margin);
     createSlip(margin, margin * 2 + slipHeight);
     createSlip(margin * 2 + slipWidth, margin * 2 + slipHeight);
-  
-    doc.save("lastik_oteli_depo_fisi.pdf");
+
+    doc.save(datedName("tire_hotel_storage_slip", "pdf"));
   };
-  
+
   const generateHotelReceipt = (tire) => {
     const doc = new jsPDF();
-    doc.setFontSize(18);
-    doc.text("Lastik Oteli Fişi", 105, 20, null, null, "center");
-    
+    const startY = paintHeader(doc, {
+      title: "Hotel Receipt",
+      refNo: tire.plateNumber || "",
+    });
+    let y = sectionCaption(doc, "Customer", startY);
+    doc.setFont("helvetica", "bold");
     doc.setFontSize(12);
-    doc.text("Müşteri Bilgileri", 20, 40);
+    doc.setTextColor(15, 23, 42);
+    doc.text(String(tire.customerName || "—").slice(0, 48), 14, y + 1);
+
+    const infoRow = (label, value, row, col) => {
+      const x = col === 0 ? 14 : 110;
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(8.5);
+      doc.setTextColor(...DOC_BRAND.muted);
+      doc.text(label, x, y + 9 + row * 8);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(10);
+      doc.setTextColor(15, 23, 42);
+      doc.text(String(value ?? "—").slice(0, 34), x, y + 13.5 + row * 8);
+    };
+    y = sectionCaption(doc, "Vehicle & tires", y + 8);
+    infoRow("License plate", tire.plateNumber, 0, 0);
+    infoRow("Vehicle model", tire.vehicleModel, 1, 0);
+    infoRow("Brand", tire.brand, 0, 1);
+    infoRow("Size", tire.size, 1, 1);
+    infoRow("Quantity", tire.quantity, 2, 0);
+    infoRow("Status", tire.retrieved ? "Delivered" : "In Storage", 2, 1);
+
+    y = moneyTable(doc, {
+      startY: y + 34,
+      head: [["Detail", "Value"]],
+      body: [
+        ["Storage date", formatDate(tire.storageDate) || "—"],
+        ["Estimated retrieval", formatDate(tire.retrievalDate) || "—"],
+        ["Notes", String(tire.notes || "—").slice(0, 80)],
+      ],
+    });
+
+    y += 16;
+    doc.setFont("helvetica", "normal");
     doc.setFontSize(10);
-    doc.text(`Ad Soyad: ${tire.customerName}`, 20, 50);
-    
-    doc.setFontSize(12);
-    doc.text("Araç Bilgileri", 20, 70);
-    doc.setFontSize(10);
-    doc.text(`Plaka: ${tire.plateNumber}`, 20, 80);
-    doc.text(`Model: ${tire.vehicleModel}`, 20, 90);
-    
-    doc.setFontSize(12);
-    doc.text("Lastik Bilgileri", 20, 110);
-    doc.setFontSize(10);
-    doc.text(`Marka: ${tire.brand}`, 20, 120);
-    doc.text(`Ebat: ${tire.size}`, 20, 130);
-    doc.text(`Adet: ${tire.quantity}`, 20, 140);
-    doc.text(`Depolama Tarihi: ${formatDate(tire.storageDate)}`, 20, 150);
-    doc.text(`Tahmini Alınma Tarihi: ${formatDate(tire.retrievalDate)}`, 20, 160);
-    doc.text(`Not: ${tire.notes}`, 20, 170);
-    
-    doc.setFontSize(12);
-    doc.text("İmza", 20, 200);
-    doc.line(20, 210, 100, 210);
-    
-    doc.save("lastik_oteli_fisi.pdf");
+    doc.setTextColor(15, 23, 42);
+    doc.text("Customer signature", 14, y);
+    doc.text("Staff signature", 110, y);
+    doc.setDrawColor(...DOC_BRAND.muted);
+    doc.line(14, y + 12, 90, y + 12);
+    doc.line(110, y + 12, 186, y + 12);
+
+    paintFooter(doc, `Tire hotel receipt ${tire.plateNumber || ""}`);
+    doc.save(datedName("tire_hotel_receipt", "pdf"));
   };
   
   const getDashboardData = () => {
@@ -435,15 +585,16 @@ function TireHotel() {
     ).length;
   
     return [
-      { name: 'Depoda', value: storedTires },
-      { name: 'Teslim Edilmiş', value: retrievedTires },
-      { name: 'Süresi Geçmiş', value: expiredTires },
+      { name: 'In Storage', value: storedTires },
+      { name: 'Delivered', value: retrievedTires },
+      { name: 'Expired', value: expiredTires },
     ];
   };
   
   const getBrandDistribution = () => {
     const brandCounts = hotelTires.reduce((acc, tire) => {
-      acc[tire.brand] = (acc[tire.brand] || 0) + 1;
+      const brand = tire.brand || 'Unknown';
+      acc[brand] = (acc[brand] || 0) + 1;
       return acc;
     }, {});
   
@@ -455,7 +606,10 @@ function TireHotel() {
 
   const getMonthlyStats = () => {
     const monthlyData = hotelTires.reduce((acc, tire) => {
-      const month = new Date(tire.storageDate).getMonth();
+      if (!tire.storageDate) return acc;
+      const d = new Date(tire.storageDate);
+      if (Number.isNaN(d.getTime())) return acc;
+      const month = d.getMonth();
       acc[month] = (acc[month] || 0) + 1;
       return acc;
     }, {});
@@ -475,21 +629,142 @@ function TireHotel() {
     setAnchorEl(null);
   };
 
+  const handleViewCustomerTires = () => {
+    if (selectedCustomer) {
+      setSearchTerm(selectedCustomer.name || '');
+      setActiveTab(1);
+      setSnackbar({ open: true, message: `Showing tires for ${selectedCustomer.name}`, severity: 'info' });
+    }
+    handleClose();
+  };
+
+  const openAddCustomer = () => {
+    setEditingCustomer(null);
+    setCustomerForm({ name: '', email: '', phone: '' });
+    setIsCustomerDialogOpen(true);
+  };
+
+  const handleDeleteCustomer = () => {
+    if (!selectedCustomer) {
+      handleClose();
+      return;
+    }
+    setConfirmDeleteOpen(true);
+    handleClose();
+  };
+
+  const confirmDeleteCustomer = () => {
+    if (selectedCustomer) {
+      const cid = selectedCustomer.id;
+      setCustomers((prev) => prev.filter((c) => String(c?.id) !== String(cid)));
+      // Unlink (don't erase) tires of the deleted customer for the books.
+      setHotelTires((prev) =>
+        (prev || []).map((t) =>
+          String(t?.customerId) === String(cid) ? { ...t, customerId: "" } : t
+        )
+      );
+      deleteRow("hotelCustomers", cid);
+      setSnackbar({ open: true, message: 'Customer deleted successfully', severity: 'success' });
+    }
+    setConfirmDeleteOpen(false);
+    setSelectedCustomer(null);
+  };
+
+  const handleEditCustomer = () => {
+    if (!selectedCustomer) {
+      handleClose();
+      return;
+    }
+    setEditingCustomer(selectedCustomer);
+    setCustomerForm({
+      name: selectedCustomer.name || '',
+      email: selectedCustomer.email || '',
+      phone: selectedCustomer.phone || '',
+    });
+    setIsCustomerDialogOpen(true);
+    handleClose();
+  };
+
+  const handleSaveCustomer = (e) => {
+    e.preventDefault();
+    const name = (customerForm.name || '').trim();
+    if (!name) {
+      setSnackbar({ open: true, message: 'Customer name cannot be empty', severity: 'error' });
+      return;
+    }
+    if (editingCustomer) {
+      const updated = { ...editingCustomer, ...customerForm, name };
+      setCustomers((prev) =>
+        prev.map((c) => (String(c?.id) === String(editingCustomer.id) ? updated : c))
+      );
+      updateRow("hotelCustomers", editingCustomer.id, updated);
+      setSnackbar({ open: true, message: 'Customer updated successfully', severity: 'success' });
+    } else {
+      const duplicate = customers.some(
+        (c) => String(c?.name || "").trim().toLowerCase() === name.toLowerCase()
+      );
+      if (duplicate) {
+        setSnackbar({ open: true, message: 'A customer with this name already exists', severity: 'error' });
+        return;
+      }
+      const newCustomer = {
+        id: newId(),
+        ...customerForm,
+        name,
+      };
+      setCustomers((prev) => [...prev, newCustomer]);
+      insertRow("hotelCustomers", newCustomer).then((saved) => {
+        if (saved && saved.id && String(saved.id) !== String(newCustomer.id)) {
+          const savedId = saved.id;
+          setCustomers((prev) =>
+            (prev || []).map((c) =>
+              String(c?.id) === String(newCustomer.id) ? { ...c, id: savedId } : c
+            )
+          );
+        }
+      });
+      setSnackbar({ open: true, message: 'Customer added successfully', severity: 'success' });
+    }
+    setIsCustomerDialogOpen(false);
+    setEditingCustomer(null);
+    setCustomerForm({ name: '', email: '', phone: '' });
+  };
+
+  const handleExportTiresCSV = () => {
+    downloadCsv(
+      datedName("tire_hotel_report", "csv"),
+      ['ID', 'Customer Name', 'Plate', 'Vehicle', 'Brand', 'Size', 'Quantity', 'Storage Date', 'Retrieval Date', 'Status', 'Notes'],
+      hotelTires.map((t) => [
+        t.id,
+        t.customerName,
+        t.plateNumber,
+        t.vehicleModel,
+        t.brand,
+        t.size,
+        t.quantity,
+        t.storageDate || '',
+        t.retrievalDate || '',
+        t.retrieved ? 'Delivered' : 'In Storage',
+        t.notes,
+      ])
+    );
+    setSnackbar({ open: true, message: 'Tire report exported to CSV', severity: 'success' });
+  };
+
   return (
-    <ThemeProvider theme={theme}>
-      <CssBaseline />
-      <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
+    <ThemeProvider theme={extendAppTheme}>
+      <Box sx={{ display: 'flex', flexDirection: 'column' }}>
         <Box sx={{ flexGrow: 1, padding: 3 }}>
           <Typography variant="h4" gutterBottom color="primary" sx={{ marginBottom: 3 }}>
-            Lastik Oteli Yönetim Sistemi
+            Tire Hotel
           </Typography>
           
           <Tabs value={activeTab} onChange={(e, newValue) => setActiveTab(newValue)} sx={{ marginBottom: 3 }}>
             <Tab label="Dashboard" icon={<DashboardIcon />} />
-            <Tab label="Lastik Yönetimi" icon={<InventoryIcon />} />
-            <Tab label="Müşteri Yönetimi" icon={<PersonIcon />} />
-            <Tab label="Takvim" icon={<CalendarMonthIcon />} />
-            <Tab label="Raporlar" icon={<BarChartIcon />} />
+            <Tab label="Tire Management" icon={<InventoryIcon />} />
+            <Tab label="Customer Management" icon={<PersonIcon />} />
+            <Tab label="Calendar" icon={<CalendarMonthIcon />} />
+            <Tab label="Reports" icon={<BarChartIcon />} />
           </Tabs>
   
           {activeTab === 0 && (
@@ -497,12 +772,13 @@ function TireHotel() {
               <Grid item xs={12} md={6}>
                 <Card>
                   <CardContent>
-                    <Typography variant="h6" gutterBottom>Lastik Durumu</Typography>
-                    <PieChart width={400} height={300}>
+                    <Typography variant="h6" gutterBottom>Tire Status</Typography>
+                    <ResponsiveContainer width="100%" height={300}>
+                    <PieChart>
                       <Pie
                         data={getDashboardData()}
-                        cx={200}
-                        cy={150}
+                        cx="50%"
+                        cy="50%"
                         labelLine={false}
                         label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
                         outerRadius={80}
@@ -515,16 +791,16 @@ function TireHotel() {
                       </Pie>
                       <RechartsTooltip />
                     </PieChart>
+                    </ResponsiveContainer>
                   </CardContent>
                 </Card>
               </Grid>
               <Grid item xs={12} md={6}>
                 <Card>
                   <CardContent>
-                    <Typography variant="h6" gutterBottom>Marka Dağılımı</Typography>
+                    <Typography variant="h6" gutterBottom>Brand Distribution</Typography>
+                    <ResponsiveContainer width="100%" height={300}>
                     <BarChart
-                      width={400}
-                      height={300}
                       data={getBrandDistribution()}
                       margin={{
                         top: 5,
@@ -540,16 +816,16 @@ function TireHotel() {
                       <Legend />
                       <Bar dataKey="value" fill="#8884d8" />
                     </BarChart>
+                    </ResponsiveContainer>
                   </CardContent>
                 </Card>
               </Grid>
               <Grid item xs={12}>
                 <Card>
                   <CardContent>
-                    <Typography variant="h6" gutterBottom>Aylık İstatistikler</Typography>
+                    <Typography variant="h6" gutterBottom>Monthly Statistics</Typography>
+                    <ResponsiveContainer width="100%" height={300}>
                     <LineChart
-                      width={800}
-                      height={300}
                       data={getMonthlyStats()}
                       margin={{
                         top: 5,
@@ -565,18 +841,19 @@ function TireHotel() {
                       <Legend />
                       <Line type="monotone" dataKey="count" stroke="#8884d8" activeDot={{ r: 8 }} />
                     </LineChart>
+                    </ResponsiveContainer>
                   </CardContent>
                 </Card>
               </Grid>
               <Grid item xs={12}>
                 <Card>
                   <CardContent>
-                    <Typography variant="h6" gutterBottom>Hızlı İstatistikler</Typography>
+                    <Typography variant="h6" gutterBottom>Quick Statistics</Typography>
                     <Grid container spacing={3}>
                       <Grid item xs={12} sm={3}>
                         <Paper elevation={3} sx={{ p: 2, textAlign: 'center' }}>
                           <Typography variant="h4">{hotelTires.length}</Typography>
-                          <Typography variant="subtitle1">Toplam Lastik</Typography>
+                          <Typography variant="subtitle1">Total Tires</Typography>
                         </Paper>
                       </Grid>
                       <Grid item xs={12} sm={3}>
@@ -584,7 +861,7 @@ function TireHotel() {
                           <Typography variant="h4">
                             {hotelTires.filter(tire => !tire.retrieved).length}
                           </Typography>
-                          <Typography variant="subtitle1">Depodaki Lastik</Typography>
+                          <Typography variant="subtitle1">Tires in Storage</Typography>
                         </Paper>
                       </Grid>
                       <Grid item xs={12} sm={3}>
@@ -594,13 +871,13 @@ function TireHotel() {
                               tire.retrievalDate && new Date(tire.retrievalDate) < new Date() && !tire.retrieved
                             ).length}
                           </Typography>
-                          <Typography variant="subtitle1">Süresi Geçmiş Lastik</Typography>
+                          <Typography variant="subtitle1">Expired Tires</Typography>
                         </Paper>
                       </Grid>
                       <Grid item xs={12} sm={3}>
                         <Paper elevation={3} sx={{ p: 2, textAlign: 'center' }}>
                           <Typography variant="h4">{customers.length}</Typography>
-                          <Typography variant="subtitle1">Toplam Müşteri</Typography>
+                          <Typography variant="subtitle1">Total Customers</Typography>
                         </Paper>
                       </Grid>
                     </Grid>
@@ -614,7 +891,7 @@ function TireHotel() {
             <>
               <Box sx={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
                 <TextField
-                  label="Ara"
+                  label="Search"
                   variant="outlined"
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
@@ -633,7 +910,7 @@ function TireHotel() {
                     onClick={() => setIsDialogOpen(true)}
                     sx={{ marginRight: 2 }}
                   >
-                    Yeni Lastik Ekle
+                    Add New Tire
                   </Button>
                   <FormControlLabel
                     control={
@@ -643,25 +920,31 @@ function TireHotel() {
                         color="primary"
                       />
                     }
-                    label="Sadece Süresi Geçenleri Göster"
+                    label="Show Expired Only"
                   />
                 </Box>
               </Box>
               <StyledDataGrid
                 rows={filteredTires}
                 columns={columns}
-                pageSize={10}
-                rowsPerPageOptions={[10, 25, 50]}
-                checkboxSelection
-                disableSelectionOnClick
-                components={{
-                  Toolbar: GridToolbar,
+                paginationModel={paginationModel}
+                onPaginationModelChange={setPaginationModel}
+                pageSizeOptions={[10, 25, 50]}
+                disableRowSelectionOnClick
+                slots={{
+                  toolbar: GridToolbar,
                 }}
               />
             </>
           )}
 
           {activeTab === 2 && (
+            <>
+              <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 2 }}>
+                <Button variant="contained" onClick={openAddCustomer}>
+                  Add Customer
+                </Button>
+              </Box>
             <Grid container spacing={3}>
               {customers.map((customer) => (
                 <Grid item xs={12} sm={6} md={4} key={customer.id}>
@@ -673,7 +956,7 @@ function TireHotel() {
                     </CardContent>
                     <CardActions>
                       <Button size="small" onClick={(event) => handleCustomerClick(event, customer)}>
-                        Detaylar
+                        Details
                       </Button>
                     </CardActions>
                   </Card>
@@ -684,11 +967,12 @@ function TireHotel() {
                 open={Boolean(anchorEl)}
                 onClose={handleClose}
               >
-                <MenuItem onClick={handleClose}>Düzenle</MenuItem>
-                <MenuItem onClick={handleClose}>Sil</MenuItem>
-                <MenuItem onClick={handleClose}>Lastikleri Görüntüle</MenuItem>
+                <MenuItem onClick={handleEditCustomer}>Edit</MenuItem>
+                <MenuItem onClick={handleDeleteCustomer}>Delete</MenuItem>
+                <MenuItem onClick={handleViewCustomerTires}>View Tires</MenuItem>
               </Menu>
             </Grid>
+            </>
           )}
 
           {activeTab === 3 && (
@@ -702,19 +986,58 @@ function TireHotel() {
           )}
 
           {activeTab === 4 && (
-            <Typography variant="h6">Raporlar bölümü geliştirme aşamasında...</Typography>
+            <Card>
+              <CardContent>
+                <Typography variant="h6" gutterBottom>Tire Hotel Reports</Typography>
+                <Grid container spacing={2} sx={{ mb: 2 }}>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <Paper elevation={2} sx={{ p: 2, textAlign: 'center' }}>
+                      <Typography variant="h4">{hotelTires.length}</Typography>
+                      <Typography variant="subtitle2">Total Tires</Typography>
+                    </Paper>
+                  </Grid>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <Paper elevation={2} sx={{ p: 2, textAlign: 'center' }}>
+                      <Typography variant="h4">{hotelTires.filter((t) => !t.retrieved).length}</Typography>
+                      <Typography variant="subtitle2">In Storage</Typography>
+                    </Paper>
+                  </Grid>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <Paper elevation={2} sx={{ p: 2, textAlign: 'center' }}>
+                      <Typography variant="h4">{hotelTires.filter((t) => t.retrieved).length}</Typography>
+                      <Typography variant="subtitle2">Delivered</Typography>
+                    </Paper>
+                  </Grid>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <Paper elevation={2} sx={{ p: 2, textAlign: 'center' }}>
+                      <Typography variant="h4">{hotelTires.filter((t) => t.retrievalDate && !Number.isNaN(new Date(t.retrievalDate).getTime()) && new Date(t.retrievalDate) < new Date() && !t.retrieved).length}</Typography>
+                      <Typography variant="subtitle2">Expired</Typography>
+                    </Paper>
+                  </Grid>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <Paper elevation={2} sx={{ p: 2, textAlign: 'center' }}>
+                      <Typography variant="h4">{customers.length}</Typography>
+                      <Typography variant="subtitle2">Total Customers</Typography>
+                    </Paper>
+                  </Grid>
+                </Grid>
+                <Button variant="contained" onClick={handleExportTiresCSV}>
+                  Export Tires CSV
+                </Button>
+              </CardContent>
+            </Card>
           )}
         </Box>
 
         <Dialog open={isDialogOpen} onClose={() => setIsDialogOpen(false)} maxWidth="md" fullWidth>
-          <DialogTitle>{editingTire ? 'Lastik Düzenle' : 'Yeni Lastik Ekle'}</DialogTitle>
+          <form onSubmit={handleSubmit}>
+          <DialogTitle>{editingTire ? 'Edit Tire' : 'Add New Tire'}</DialogTitle>
           <DialogContent>
-            <form onSubmit={handleSubmit}>
               <Grid container spacing={2}>
                 <Grid item xs={12} sm={6}>
                   <TextField
                     name="customerName"
-                    label="Müşteri Adı"
+                    label="Customer Name"
                     value={newTire.customerName}
                     onChange={handleChange}
                     fullWidth
@@ -725,7 +1048,7 @@ function TireHotel() {
                 <Grid item xs={12} sm={6}>
                   <TextField
                     name="plateNumber"
-                    label="Plaka"
+                    label="License Plate"
                     value={newTire.plateNumber}
                     onChange={handleChange}
                     fullWidth
@@ -736,7 +1059,7 @@ function TireHotel() {
                 <Grid item xs={12} sm={6}>
                   <TextField
                     name="vehicleModel"
-                    label="Araç Modeli"
+                    label="Vehicle Model"
                     value={newTire.vehicleModel}
                     onChange={handleChange}
                     fullWidth
@@ -746,7 +1069,7 @@ function TireHotel() {
                 <Grid item xs={12} sm={6}>
                   <TextField
                     name="brand"
-                    label="Marka"
+                    label="Brand"
                     value={newTire.brand}
                     onChange={handleChange}
                     fullWidth
@@ -757,7 +1080,7 @@ function TireHotel() {
                 <Grid item xs={12} sm={6}>
                   <TextField
                     name="size"
-                    label="Ebat"
+                    label="Size"
                     value={newTire.size}
                     onChange={handleChange}
                     fullWidth
@@ -768,7 +1091,7 @@ function TireHotel() {
                 <Grid item xs={12} sm={6}>
                   <TextField
                     name="quantity"
-                    label="Adet"
+                    label="Quantity"
                     type="number"
                     value={newTire.quantity}
                     onChange={handleChange}
@@ -780,7 +1103,7 @@ function TireHotel() {
                 <Grid item xs={12} sm={6}>
                   <TextField
                     name="storageDate"
-                    label="Depolama Tarihi"
+                    label="Storage Date"
                     type="date"
                     value={newTire.storageDate}
                     onChange={handleChange}
@@ -793,7 +1116,7 @@ function TireHotel() {
                 <Grid item xs={12} sm={6}>
                   <TextField
                     name="retrievalDate"
-                    label="Tahmini Alınma Tarihi"
+                    label="Estimated Retrieval Date"
                     type="date"
                     value={newTire.retrievalDate}
                     onChange={handleChange}
@@ -805,7 +1128,7 @@ function TireHotel() {
                 <Grid item xs={12}>
                   <TextField
                     name="notes"
-                    label="Notlar"
+                    label="Notes"
                     value={newTire.notes}
                     onChange={handleChange}
                     fullWidth
@@ -824,24 +1147,85 @@ function TireHotel() {
                   />
                   <label htmlFor="raised-button-file">
                     <Button variant="outlined" component="span" startIcon={<PhotoCamera />}>
-                      Fotoğraf Yükle
+                      Upload Photo
                     </Button>
                   </label>
                   {newTire.photo && (
-                    <TireImage src={newTire.photo} alt="Lastik fotoğrafı" />
+                    <TireImage src={newTire.photo} alt="Tire photo" />
                   )}
                 </Grid>
               </Grid>
-            </form>
           </DialogContent>
           <DialogActions>
-            <Button onClick={() => setIsDialogOpen(false)}>İptal</Button>
-            <Button onClick={handleSubmit} variant="contained" color="primary">
-              {editingTire ? 'Güncelle' : 'Ekle'}
+            <Button onClick={() => setIsDialogOpen(false)} disabled={isSaving}>Cancel</Button>
+            <Button type="submit" variant="contained" color="primary" disabled={isSaving} startIcon={isSaving ? <CircularProgress size={20} color="inherit" /> : null}>
+              {isSaving ? 'Saving...' : (editingTire ? 'Update' : 'Add')}
             </Button>
+          </DialogActions>
+          </form>
+        </Dialog>
+
+        <Dialog open={isCustomerDialogOpen} onClose={() => setIsCustomerDialogOpen(false)} maxWidth="sm" fullWidth>
+          <form onSubmit={handleSaveCustomer}>
+            <DialogTitle>{editingCustomer ? 'Edit Customer' : 'Add Customer'}</DialogTitle>
+            <DialogContent>
+              <Grid container spacing={2} sx={{ mt: 1 }}>
+                <Grid item xs={12}>
+                  <TextField
+                    label="Full Name"
+                    value={customerForm.name}
+                    onChange={(e) => setCustomerForm({ ...customerForm, name: e.target.value })}
+                    fullWidth
+                    required
+                  />
+                </Grid>
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    label="Email"
+                    type="email"
+                    value={customerForm.email}
+                    onChange={(e) => setCustomerForm({ ...customerForm, email: e.target.value })}
+                    fullWidth
+                  />
+                </Grid>
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    label="Phone"
+                    value={customerForm.phone}
+                    onChange={(e) => setCustomerForm({ ...customerForm, phone: e.target.value })}
+                    fullWidth
+                  />
+                </Grid>
+              </Grid>
+            </DialogContent>
+            <DialogActions>
+              <Button onClick={() => setIsCustomerDialogOpen(false)}>Cancel</Button>
+              <Button type="submit" variant="contained">{editingCustomer ? 'Update' : 'Add'}</Button>
+            </DialogActions>
+          </form>
+        </Dialog>
+
+        <Dialog open={confirmDeleteOpen} onClose={() => setConfirmDeleteOpen(false)} maxWidth="xs" fullWidth>
+          <DialogTitle>Delete customer?</DialogTitle>
+          <DialogContent>
+            <Typography variant="body2">
+              {selectedCustomer ? `Delete customer "${selectedCustomer.name}"? This cannot be undone.` : 'Delete this customer?'}
+            </Typography>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setConfirmDeleteOpen(false)}>Cancel</Button>
+            <Button onClick={confirmDeleteCustomer} color="error" variant="contained">Delete</Button>
           </DialogActions>
         </Dialog>
 
+        <SuccessModal
+          open={successModal.open}
+          onClose={() => setSuccessModal({ ...successModal, open: false })}
+          title={successModal.title}
+          message={successModal.message}
+          details={successModal.details}
+          actionLabel="Done"
+        />
         <Snackbar
           open={snackbar.open}
           autoHideDuration={6000}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef, Suspense, lazy } from "react";
 import { BrowserRouter as Router } from "react-router-dom";
 import {
   ThemeProvider,
@@ -24,8 +24,8 @@ import {
   MenuItem,
   Fade,
   Badge,
-  Button,
   SwipeableDrawer,
+  ListSubheader,
 } from "@mui/material";
 import { styled } from "@mui/material/styles";
 import MenuIcon from "@mui/icons-material/Menu";
@@ -36,29 +36,54 @@ import HotelIcon from "@mui/icons-material/Hotel";
 import ListAltIcon from "@mui/icons-material/ListAlt";
 import Brightness4Icon from "@mui/icons-material/Brightness4";
 import Brightness7Icon from "@mui/icons-material/Brightness7";
-import AccountCircleIcon from "@mui/icons-material/AccountCircle";
 import SettingsIcon from "@mui/icons-material/Settings";
 import ExitToAppIcon from "@mui/icons-material/ExitToApp";
 import NotificationsIcon from "@mui/icons-material/Notifications";
 import TireRepairIcon from "@mui/icons-material/BuildCircle";
 import AnalyticsIcon from "@mui/icons-material/Analytics";
-import InventoryIcon from "@mui/icons-material/Inventory";
 import LocalShippingIcon from "@mui/icons-material/LocalShipping";
-import TireForm from "./components/TireForm";
-import TireList from "./components/TireList";
-import Dashboard from "./components/Dashboard";
-import SaleForm from "./components/SaleForm";
-import TireHotel from "./components/TireHotel";
-import CurrentAccount from "./components/CurrentAccount";
-import Inventory from "./components/Inventory";
-import Deliveries from "./components/Deliveries";
-import VehicleTracking from "./components/VehicleTracking";
-import WorkerTracking from "./components/WorkerTracking";
+import StoreIcon from "@mui/icons-material/Store";
 import DirectionsCarIcon from "@mui/icons-material/DirectionsCar";
 import PersonIcon from "@mui/icons-material/Person";
-import AppointmentSystem from "./components/AppointmentSystem";
-import "antd/dist/reset.css";
+import InventoryIcon from "@mui/icons-material/Inventory";
+import GroupIcon from "@mui/icons-material/Group";
+import { supabase } from "./lib/supabaseClient";
 import CalendarTodayIcon from "@mui/icons-material/CalendarToday";
+import { getLowStockThreshold, getCurrency } from "./lib/settings";
+import {
+  loadTable,
+  insertRow,
+  updateRow,
+  deleteRow,
+  deleteRowsByTireId,
+  upsertInventoryRow,
+  isSupabaseConfigured,
+  getCurrentShopId,
+  setCurrentShopId,
+} from "./lib/store";
+import {
+  resolveShopMemberships,
+  enterShop,
+} from "./lib/team";
+import Dashboard from "./components/Dashboard";
+import ErrorBoundary from "./components/ErrorBoundary";
+import { CircularProgress } from "@mui/material";
+// Code-split heavy screens so the first paint stays small (prod bundle fix).
+// Dashboard stays eager (landing screen); everything else lazy-loads on demand.
+const TireForm = lazy(() => import("./components/TireForm"));
+const TireList = lazy(() => import("./components/TireList"));
+const SaleForm = lazy(() => import("./components/SaleForm"));
+const TireHotel = lazy(() => import("./components/TireHotel"));
+const CurrentAccount = lazy(() => import("./components/CurrentAccount"));
+const Inventory = lazy(() => import("./components/Inventory"));
+const Deliveries = lazy(() => import("./components/Deliveries"));
+const VehicleTracking = lazy(() => import("./components/VehicleTracking"));
+const WorkerTracking = lazy(() => import("./components/WorkerTracking"));
+const AppointmentSystem = lazy(() => import("./components/AppointmentSystem"));
+const Settings = lazy(() => import("./components/Settings"));
+const AuthModal = lazy(() => import("./components/AuthModal"));
+const ShopGate = lazy(() => import("./components/ShopGate"));
+const TeamManagement = lazy(() => import("./components/TeamManagement"));
 
 const drawerWidth = 240;
 
@@ -139,15 +164,274 @@ const App = () => {
   const [open, setOpen] = useState(true);
   const [darkMode, setDarkMode] = useState(false);
   const [anchorEl, setAnchorEl] = useState(null);
-  const [user, setUser] = useState({
-    name: "Yusuf AYKIN",
-    role: "Admin",
-    avatar: "/path/to/avatar.jpg",
+  const [user, setUser] = useState(() => {
+    try {
+      const stored = localStorage.getItem("blackwheel_auth_user");
+      if (stored) return JSON.parse(stored);
+      // One-time migration from the previous brand's session key.
+      const legacy = localStorage.getItem("dost_auth_user");
+      if (legacy) {
+        localStorage.setItem("blackwheel_auth_user", legacy);
+        localStorage.removeItem("dost_auth_user");
+        return JSON.parse(legacy);
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
   });
-  const [notifications, setNotifications] = useState(3);
   const [inventory, setInventory] = useState([]);
   const [deliveries, setDeliveries] = useState([]);
-  const [vehicles, setVehicles] = useState([]);
+  const [storageWarning, setStorageWarning] = useState("");
+  const [shop, setShop] = useState(null);
+  const loadedRef = useRef(false);
+
+  // ---- Multi-tenant shop session --------------------------------------
+  // Single shop => enter silently; none/many => ShopGate picks. Offline =>
+  // no shops at all (pure local mode).
+  const enterMemberships = (baseUser, memberships) => {
+    const list = memberships || [];
+    const storedId = getCurrentShopId();
+    const match =
+      storedId && list.find((m) => String(m.shopId) === String(storedId));
+    const chosen = match || (list.length === 1 ? list[0] : null);
+    if (chosen) {
+      setShop({
+        id: chosen.shopId,
+        name: chosen.shopName,
+        role: chosen.role,
+        profileId: chosen.profileId,
+      });
+      enterShop(chosen);
+    } else {
+      setShop(null);
+      setCurrentShopId("");
+    }
+    const full = {
+      ...baseUser,
+      memberships: list,
+      role: (chosen && chosen.role) || baseUser.role || "Staff",
+    };
+    setUser(full);
+    try {
+      localStorage.setItem("blackwheel_auth_user", JSON.stringify(full));
+    } catch (e) {
+      // ignore
+    }
+    return full;
+  };
+
+  const resolveAndEnter = async (baseUser) => {
+    if (!isSupabaseConfigured() || !baseUser) {
+      if (baseUser) setUser(baseUser);
+      return baseUser;
+    }
+    try {
+      const resolved = await resolveShopMemberships({
+        id: baseUser.id,
+        email: baseUser.email,
+      });
+      if (resolved && resolved.blocked) {
+        // Deactivated while away — drop to the login screen.
+        try {
+          if (supabase && supabase.auth) await supabase.auth.signOut();
+        } catch (e) {
+          // ignore
+        }
+        setUser(null);
+        setShop(null);
+        try {
+          localStorage.removeItem("blackwheel_auth_user");
+        } catch (e) {
+          // ignore
+        }
+        setCurrentShopId("");
+        return null;
+      }
+      return enterMemberships(baseUser, (resolved && resolved.memberships) || []);
+    } catch (e) {
+      setUser(baseUser);
+      return baseUser;
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      if (supabase && supabase.auth) {
+        await supabase.auth.signOut();
+      }
+    } catch (e) {
+      // ignore
+    }
+    setUser(null);
+    setShop(null);
+    try {
+      localStorage.removeItem("blackwheel_auth_user");
+    } catch (e) {
+      // ignore
+    }
+    setCurrentShopId("");
+  };
+
+  // Wire bell icon to actual low-stock count: stock <= lowStockThreshold
+  const lowStockCount = useMemo(() => {
+    const threshold = getLowStockThreshold();
+    return (tires || []).filter((t) => (Number(t?.stock) || 0) <= threshold).length;
+  }, [tires]);
+
+  const componentTitles = useMemo(() => ({
+    Dashboard: "Dashboard",
+    TireForm: "Add New Tire",
+    TireList: "Tire List",
+    SaleForm: "Sell Tire",
+    TireHotel: "Tire Hotel",
+    CurrentAccount: "Current Account",
+    VehicleTracking: "Vehicle Tracking",
+    WorkerTracking: "Worker Tracking",
+    AppointmentSystem: "Appointment System",
+    Inventory: "Inventory",
+    Deliveries: "Deliveries",
+    Settings: "Settings",
+    TeamManagement: "Team",
+  }), []);
+
+  // Sync Supabase Auth session if configured
+  useEffect(() => {
+    let subscription = null;
+    try {
+      if (supabase && supabase.auth) {
+        supabase.auth.getSession().then(({ data: { session } }) => {
+          if (session?.user) {
+            resolveAndEnter({
+              id: session.user.id,
+              email: session.user.email,
+              name: session.user.user_metadata?.full_name || session.user.email.split('@')[0],
+              role: session.user.user_metadata?.role || 'Staff',
+              avatar: session.user.user_metadata?.avatar_url || '',
+            });
+          }
+        }).catch(() => {
+          // ignore
+        });
+
+        const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+          if (session?.user) {
+            resolveAndEnter({
+              id: session.user.id,
+              email: session.user.email,
+              name: session.user.user_metadata?.full_name || session.user.email.split('@')[0],
+              role: session.user.user_metadata?.role || 'Staff',
+              avatar: session.user.user_metadata?.avatar_url || '',
+            });
+          } else if (_event === 'SIGNED_OUT') {
+            setUser(null);
+            setShop(null);
+            try {
+              localStorage.removeItem("blackwheel_auth_user");
+            } catch (e) {
+              // ignore
+            }
+            setCurrentShopId("");
+          }
+        });
+        subscription = data?.subscription;
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    return () => {
+      if (subscription?.unsubscribe) subscription.unsubscribe();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // UUID-first IDs so local rows match Postgres `uuid` PKs.
+  // Legacy localStorage rows may still carry numeric Date.now() ids — all
+  // lookups below use String() comparison so both shapes keep working.
+  const newId = () => {
+    try {
+      if (typeof crypto !== "undefined" && crypto.randomUUID) {
+        return crypto.randomUUID();
+      }
+    } catch (e) {
+      // fall through to fallback
+    }
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  };
+
+  // Canonical cost / retail accessors. Legacy rows only have `price`
+  // (purchase cost); new rows carry costPrice + retailPrice explicitly.
+  const getCost = (tire) => {
+    if (!tire) return 0;
+    const raw =
+      tire.costPrice !== undefined && tire.costPrice !== "" ? tire.costPrice : tire.price;
+    const n = Number(raw);
+    return Number.isNaN(n) ? 0 : n;
+  };
+
+  const getRetail = (tire) => {
+    if (!tire) return NaN;
+    // NOTE: no fallback to `price` — `price` is wholesale cost. Falling back
+    // here is exactly what made sale forms default to cost and zero out profit.
+    const raw = tire.retailPrice;
+    if (raw === undefined || raw === null || raw === "") return NaN;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : NaN;
+  };
+
+  const safeParse = (key, fallback) => {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return fallback;
+      const parsed = JSON.parse(raw);
+      return parsed === null || parsed === undefined ? fallback : parsed;
+    } catch (e) {
+      console.error(`Failed to parse localStorage key "${key}":`, e);
+      return fallback;
+    }
+  };
+
+  const safeSave = (key, value) => {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+      return true;
+    } catch (e) {
+      const isQuota =
+        e &&
+        (e.name === "QuotaExceededError" ||
+          e.name === "NS_ERROR_DOM_QUOTA_REACHED" ||
+          e.code === 22);
+      console.error(`Failed to save localStorage key "${key}":`, e);
+      // Quota fallback for tires: retry without embedded base64 images so the
+      // structured data survives even when photos would blow the ~5MB limit.
+      // (Photos prefer Supabase Storage URLs; see uploadTirePhoto.)
+      if (isQuota && key === "tires" && Array.isArray(value)) {
+        try {
+          const stripped = value.map((t) => {
+            if (t && Array.isArray(t.images) && t.images.some((img) => typeof img === "string" && img.startsWith("data:"))) {
+              const kept = (t.images || []).filter(
+                (img) => typeof img === "string" && !img.startsWith("data:")
+              );
+              return { ...t, images: kept };
+            }
+            return t;
+          });
+          localStorage.setItem(key, JSON.stringify(stripped));
+          setStorageWarning(
+            "Browser storage is full — tire photos were dropped to preserve inventory data. Connect Supabase Storage or remove photos."
+          );
+          return true;
+        } catch (e2) {
+          console.error("Quota fallback save also failed:", e2);
+        }
+      }
+      setStorageWarning(
+        "Browser storage is full — recent changes may not persist after refresh. Export a backup from Settings."
+      );
+      return false;
+    }
+  };
 
   const prefersDarkMode = useMediaQuery("(prefers-color-scheme: dark)");
   const isMobile = useMediaQuery("(max-width:600px)");
@@ -218,105 +502,475 @@ const App = () => {
   );
 
   useEffect(() => {
-    const loadData = () => {
-      const storedTires = JSON.parse(localStorage.getItem("tires")) || [];
-      const storedSales = JSON.parse(localStorage.getItem("sales")) || [];
-      const storedHotelTires =
-        JSON.parse(localStorage.getItem("hotelTires")) || [];
-      const storedInventory =
-        JSON.parse(localStorage.getItem("inventory")) || [];
-      const storedDeliveries =
-        JSON.parse(localStorage.getItem("deliveries")) || [];
-      setTires(storedTires);
-      setSales(storedSales);
-      setHotelTires(storedHotelTires);
-      setInventory(storedInventory);
-      setDeliveries(storedDeliveries);
+    // Cloud mode waits for a shop (tenant isolation); offline loads at once.
+    if (isSupabaseConfigured() && !shop) {
+      loadedRef.current = false;
+      return;
+    }
+    const loadData = async () => {
+      // Try Supabase first; null = not configured / failed / no shop -> localStorage fallback.
+      const [remoteTires, remoteSales, remoteInventory, remoteDeliveries] =
+        await Promise.all([
+          loadTable("tires"),
+          loadTable("sales"),
+          loadTable("inventory"),
+          loadTable("deliveries"),
+        ]);
+      const localTires = safeParse("tires", []);
+      const localSales = safeParse("sales", []);
+      setTires(remoteTires !== null ? remoteTires : localTires);
+      setSales(remoteSales !== null ? remoteSales : localSales);
+      setHotelTires(safeParse("hotelTires", []));
+      setInventory(
+        remoteInventory !== null ? remoteInventory : safeParse("inventory", [])
+      );
+      setDeliveries(
+        remoteDeliveries !== null ? remoteDeliveries : safeParse("deliveries", [])
+      );
+      // Diagnostic: cloud reachable but returned zero rows while this browser
+      // previously cached rows -> almost always wrong shop or RLS/filtering,
+      // NOT deleted data. Point at shop + docs instead of silently wiping.
+      if (
+        isSupabaseConfigured() &&
+        shop?.id &&
+        remoteTires !== null &&
+        remoteTires.length === 0 &&
+        localTires.length > 0
+      ) {
+        setStorageWarning(
+          `Showing 0 tires for shop "${shop?.name || shop.id}". This browser previously cached ${localTires.length} tire(s) — you may be in the wrong shop, or rows belong to another shop_id / are hidden by access rules. Your Supabase rows are NOT deleted. See docs/PRODUCTION.md or check blackwheel_shop_id in browser storage.`
+        );
+      }
+      loadedRef.current = true;
     };
 
     loadData();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shop?.id]);
 
   useEffect(() => {
-    localStorage.setItem("tires", JSON.stringify(tires));
+    if (!loadedRef.current) return;
+    safeSave("tires", tires);
   }, [tires]);
 
   useEffect(() => {
-    localStorage.setItem("sales", JSON.stringify(sales));
+    if (!loadedRef.current) return;
+    safeSave("sales", sales);
   }, [sales]);
 
   useEffect(() => {
-    localStorage.setItem("hotelTires", JSON.stringify(hotelTires));
+    if (!loadedRef.current) return;
+    safeSave("hotelTires", hotelTires);
   }, [hotelTires]);
 
   useEffect(() => {
-    localStorage.setItem("inventory", JSON.stringify(inventory));
+    if (!loadedRef.current) return;
+    safeSave("inventory", inventory);
   }, [inventory]);
 
   useEffect(() => {
-    localStorage.setItem("deliveries", JSON.stringify(deliveries));
+    if (!loadedRef.current) return;
+    safeSave("deliveries", deliveries);
   }, [deliveries]);
 
   const addTire = (tire) => {
-    setTires((prevTires) => [...prevTires, { ...tire, id: Date.now() }]);
-    updateInventory(tire.id, tire.stock, "increase");
+    const id = tire?.id ?? newId();
+    // Defense in depth: SKU identity must stay unique (the form pre-checks
+    // and shows the message; this guards programmatic callers).
+    const sku = String(tire?.sku ?? "").trim();
+    if (
+      sku !== "" &&
+      (tires || []).some(
+        (t) => String(t?.sku ?? "").trim().toLowerCase() === sku.toLowerCase()
+      )
+    ) {
+      console.error("Add tire failed: duplicate SKU", sku);
+      return false;
+    }
+    const stock = Number(tire.stock);
+    const safeStock = Number.isInteger(stock) && stock >= 0 ? stock : 0;
+    // Split cost vs retail: legacy `price` is treated as cost for back-compat.
+    const rawCost =
+      tire.costPrice !== undefined && tire.costPrice !== "" ? tire.costPrice : tire.price;
+    const rawRetail =
+      tire.retailPrice !== undefined && tire.retailPrice !== "" ? tire.retailPrice : rawCost;
+    const costNum = Number(rawCost);
+    const retailNum = Number(rawRetail);
+    const safeCost = Number.isFinite(costNum) && costNum >= 0 ? costNum : 0;
+    const safeRetail = Number.isFinite(retailNum) && retailNum >= 0 ? retailNum : safeCost;
+    const newTire = {
+      ...tire,
+      id,
+      price: safeCost,
+      costPrice: safeCost,
+      retailPrice: safeRetail,
+      stock: safeStock,
+      sku,
+      barcode: String(tire?.barcode ?? "").trim(),
+    };
+    setTires((prevTires) => [...prevTires, newTire]);
+    // Single source of truth: tires[].stock is canonical; inventory mirrors it.
+    updateInventory(id, safeStock, "increase");
+    // Persist to Supabase when configured (fire-and-forget, local stays source of truth offline).
+    insertRow("tires", newTire).then((saved) => {
+      const finalId = saved && saved.id ? saved.id : id;
+      // Keep the remote inventory mirror in lockstep with tires[].stock.
+      upsertInventoryRow(finalId, safeStock);
+      // Reconcile temp id -> DB uuid so later sales/deliveries keep FK integrity.
+      if (saved && saved.id && String(saved.id) !== String(id)) {
+        const savedId = saved.id;
+        setTires((prev) =>
+          (prev || []).map((t) =>
+            String(t?.id) === String(id) ? { ...t, id: savedId } : t
+          )
+        );
+        setInventory((prev) =>
+          (prev || []).map((item) =>
+            String(item?.tireId) === String(id) ? { ...item, tireId: savedId } : item
+          )
+        );
+        setDeliveries((prev) =>
+          (prev || []).map((d) =>
+            String(d?.tireId) === String(id) ? { ...d, tireId: savedId } : d
+          )
+        );
+      }
+    });
+    return id;
   };
 
   const addSale = (sale) => {
-    const tire = tires.find((t) => t.id === sale.tireId);
-    const profit = (sale.price - tire.price) * sale.quantity;
-    setSales((prevSales) => [
-      ...prevSales,
-      { ...sale, id: Date.now(), profit },
-    ]);
-    updateStock(sale.tireId, sale.quantity);
-    updateInventory(sale.tireId, sale.quantity, "decrease");
+    const tire = tires.find((t) => String(t.id) === String(sale.tireId));
+    if (!tire) {
+      console.error("Sale failed: tire not found for tireId", sale.tireId);
+      return false;
+    }
+    const saleQuantity = Number(sale.quantity);
+    const tireStock = Number(tire.stock);
+    if (!Number.isInteger(saleQuantity) || saleQuantity <= 0) {
+      console.error("Sale failed: quantity must be a positive integer");
+      return false;
+    }
+    if (Number.isNaN(tireStock) || saleQuantity > tireStock) {
+      console.error("Sale failed: quantity exceeds stock");
+      return false;
+    }
+    // Reject missing/invalid prices instead of coercing to 0 (which would
+    // fabricate a -cost*qty "profit"). Empty is only auto-filled from an
+    // explicitly set retail price — never from wholesale cost.
+    const priceMissing =
+      sale.price === "" || sale.price === undefined || sale.price === null;
+    const retail = getRetail(tire);
+    let effectivePrice;
+    if (priceMissing) {
+      if (!Number.isFinite(retail)) {
+        console.error("Sale failed: sale price is required (no retail price set on tire)");
+        return false;
+      }
+      effectivePrice = retail;
+    } else {
+      const parsed = Number(sale.price);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        console.error("Sale failed: sale price must be a number >= 0");
+        return false;
+      }
+      effectivePrice = parsed;
+    }
+    // Profit = (sale price - wholesale cost) * qty.
+    const costBasis = getCost(tire);
+    const profit = (effectivePrice - costBasis) * saleQuantity;
+    const record = {
+      ...sale,
+      quantity: saleQuantity,
+      price: effectivePrice,
+      date: sale.date || new Date().toISOString().slice(0, 10),
+      customerName: sale.customerName || "",
+      currency: sale.currency || tire.currency || getCurrency(),
+      id: sale?.id ?? newId(),
+      profit,
+    };
+    setSales((prevSales) => [...prevSales, record]);
+    // Keep BOTH states in lockstep — this is the split-brain fix.
+    updateStock(sale.tireId, saleQuantity);
+    updateInventory(sale.tireId, saleQuantity, "decrease");
+    insertRow("sales", record);
+    return true;
   };
 
   const updateStock = (tireId, soldQuantity) => {
+    if (tireId === undefined || tireId === null) return;
+    const qty = Number(soldQuantity);
+    if (Number.isNaN(qty)) return;
     setTires((prevTires) =>
       prevTires.map((tire) =>
-        tire.id === tireId
-          ? { ...tire, stock: parseInt(tire.stock) - parseInt(soldQuantity) }
+        String(tire.id) === String(tireId)
+          ? { ...tire, stock: Number(tire.stock || 0) - qty }
           : tire
       )
     );
+    // Sync the decremented stock to Supabase so reloads don't revert it.
+    const current = (tires || []).find((t) => String(t?.id) === String(tireId));
+    if (current) {
+      const newStock = (Number(current.stock) || 0) - qty;
+      updateRow("tires", tireId, { stock: newStock });
+    }
   };
 
   const addHotelTire = (hotelTire) => {
     setHotelTires((prevHotelTires) => [
       ...prevHotelTires,
-      { ...hotelTire, id: Date.now() },
+      { ...hotelTire, id: hotelTire?.id ?? newId() },
     ]);
   };
 
   const updateInventory = (tireId, quantity, action) => {
+    if (tireId === undefined || tireId === null) return;
+    const qty = Number(quantity);
+    if (Number.isNaN(qty)) return;
+    // Best-effort remote mirror: compute absolute quantity from current state.
+    const existing = (inventory || []).find(
+      (item) => String(item?.tireId) === String(tireId)
+    );
+    const currentQty = Number(existing?.quantity) || 0;
+    const nextQty =
+      action === "increase" ? currentQty + qty : currentQty - qty;
+    upsertInventoryRow(tireId, nextQty);
     setInventory((prevInventory) => {
-      const existingItem = prevInventory.find((item) => item.tireId === tireId);
+      const existingItem = (prevInventory || []).find(
+        (item) => String(item.tireId) === String(tireId)
+      );
       if (existingItem) {
+        const currentQty = Number(existingItem.quantity) || 0;
         return prevInventory.map((item) =>
-          item.tireId === tireId
+          String(item.tireId) === String(tireId)
             ? {
                 ...item,
                 quantity:
-                  action === "increase"
-                    ? item.quantity + quantity
-                    : item.quantity - quantity,
+                  action === "increase" ? currentQty + qty : currentQty - qty,
               }
             : item
         );
       } else {
-        return [...prevInventory, { tireId, quantity }];
+        return [
+          ...(prevInventory || []),
+          { tireId, quantity: action === "increase" ? qty : 0 - qty },
+        ];
       }
     });
   };
 
+  // Direct tire update (inline edit). Keeps inventory mirror in sync when
+  // stock changes instead of leaving the two counts diverged.
+  // Syncs to Supabase so edits survive reload.
+  const updateTire = (tireId, patch) => {
+    if (tireId === undefined || tireId === null || !patch) return false;
+    let nextStock = null;
+    if (patch.stock !== undefined) {
+      const s = Number(patch.stock);
+      if (!Number.isInteger(s) || s < 0) return false;
+      nextStock = s;
+    }
+    setTires((prev) =>
+      (prev || []).map((t) =>
+        String(t?.id) === String(tireId) ? { ...t, ...patch } : t
+      )
+    );
+    if (nextStock !== null) {
+      // Mirror semantics: inventory.quantity tracks tires[].stock exactly.
+      setInventory((prev) => {
+        const exists = (prev || []).some(
+          (item) => String(item?.tireId) === String(tireId)
+        );
+        if (exists) {
+          return (prev || []).map((item) =>
+            String(item?.tireId) === String(tireId)
+              ? { ...item, quantity: nextStock }
+              : item
+          );
+        }
+        return [...(prev || []), { tireId, quantity: nextStock }];
+      });
+    }
+    updateRow("tires", tireId, patch);
+    if (nextStock !== null) {
+      upsertInventoryRow(tireId, nextStock);
+    }
+    return true;
+  };
+
+  // Cascading delete — removes tire + its inventory mirror + its deliveries so
+  // no "Unknown tire" ghost rows linger. Sales are kept for accounting.
+  // Deletes propagate to Supabase (children first, then the tire itself).
+  const deleteTire = (tireId) => {
+    if (tireId === undefined || tireId === null) return;
+    const key = String(tireId);
+    setTires((prev) => (prev || []).filter((t) => String(t?.id) !== key));
+    setInventory((prev) =>
+      (prev || []).filter((item) => String(item?.tireId) !== key)
+    );
+    setDeliveries((prev) =>
+      (prev || []).filter((d) => String(d?.tireId) !== key)
+    );
+    deleteRowsByTireId("inventory", tireId);
+    deleteRowsByTireId("deliveries", tireId);
+    deleteRow("tires", tireId);
+  };
+
+  // Remove inventory/delivery rows whose tire no longer exists.
+  const purgeOrphanRecords = () => {
+    const validIds = new Set((tires || []).map((t) => String(t?.id)));
+    const orphanTireIds = new Set();
+    (inventory || []).forEach((item) => {
+      if (item && !validIds.has(String(item?.tireId))) {
+        orphanTireIds.add(item.tireId);
+      }
+    });
+    (deliveries || []).forEach((d) => {
+      if (d && !validIds.has(String(d?.tireId))) {
+        orphanTireIds.add(d.tireId);
+      }
+    });
+    setInventory((prev) =>
+      (prev || []).filter((item) => validIds.has(String(item?.tireId)))
+    );
+    setDeliveries((prev) =>
+      (prev || []).filter((d) => validIds.has(String(d?.tireId)))
+    );
+    // Remove the same orphans remotely so they don't reappear on reload.
+    orphanTireIds.forEach((orphanId) => {
+      deleteRowsByTireId("inventory", orphanId);
+      deleteRowsByTireId("deliveries", orphanId);
+    });
+  };
+
+  // One-way reconcile: ensure every tire has an inventory mirror equal to its
+  // stock. Repairs legacy drift where deliveries bumped only one side.
+  const resyncInventoryFromTires = () => {
+    setInventory((prev) => {
+      const prevMap = {};
+      (prev || []).forEach((item) => {
+        if (item) prevMap[String(item.tireId)] = item;
+      });
+      return (tires || []).map((t) => {
+        const k = String(t?.id);
+        const existing = prevMap[k];
+        return existing
+          ? { ...existing, tireId: t.id, quantity: Number(t?.stock) || 0 }
+          : { tireId: t.id, quantity: Number(t?.stock) || 0 };
+      });
+    });
+    (tires || []).forEach((t) => {
+      if (t) upsertInventoryRow(t.id, Number(t?.stock) || 0);
+    });
+  };
+
   const addDelivery = (delivery) => {
-    setDeliveries((prevDeliveries) => [
-      ...prevDeliveries,
-      { ...delivery, id: Date.now() },
-    ]);
-    updateInventory(delivery.tireId, delivery.quantity, "increase");
+    if (!delivery || delivery.tireId === undefined || delivery.tireId === null)
+      return;
+    const qty = Number(delivery.quantity);
+    if (!Number.isInteger(qty) || qty <= 0) return;
+    const date = delivery.date || new Date().toISOString().slice(0, 10);
+    const record = { ...delivery, quantity: qty, date, id: delivery?.id ?? newId() };
+    setDeliveries((prevDeliveries) => [...prevDeliveries, record]);
+    // FIX: deliveries must bump BOTH states. Previously only
+    // inventory.quantity moved, leaving tires[].stock (and SaleForm checks)
+    // stuck at the old value.
+    setTires((prevTires) =>
+      (prevTires || []).map((t) =>
+        String(t?.id) === String(delivery.tireId)
+          ? { ...t, stock: (Number(t?.stock) || 0) + qty }
+          : t
+      )
+    );
+    updateInventory(delivery.tireId, qty, "increase");
+    insertRow("deliveries", record);
+    // Sync the bumped stock so reloads don't revert it.
+    const current = (tires || []).find(
+      (t) => String(t?.id) === String(delivery.tireId)
+    );
+    if (current) {
+      updateRow("tires", delivery.tireId, {
+        stock: (Number(current.stock) || 0) + qty,
+      });
+    }
+  };
+
+  const deleteDelivery = (id) => {
+    // Read target outside the updater: calling setState inside an updater is
+    // impure and double-fires under StrictMode, corrupting stock counts.
+    const target = (deliveries || []).find((d) => String(d?.id) === String(id));
+    if (target) {
+      // Revert BOTH sides of the delivery increase.
+      const qty = Number(target.quantity) || 0;
+      if (qty > 0 && target.tireId !== undefined && target.tireId !== null) {
+        setInventory((prevInv) =>
+          (prevInv || []).map((item) =>
+            String(item.tireId) === String(target.tireId)
+              ? { ...item, quantity: (Number(item.quantity) || 0) - qty }
+              : item
+          )
+        );
+        setTires((prevTires) =>
+          (prevTires || []).map((t) =>
+            String(t?.id) === String(target.tireId)
+              ? { ...t, stock: (Number(t?.stock) || 0) - qty }
+              : t
+          )
+        );
+        // Sync the reverted stock + inventory mirror to Supabase.
+        const currentTire = (tires || []).find(
+          (t) => String(t?.id) === String(target.tireId)
+        );
+        if (currentTire) {
+          const newStock = (Number(currentTire.stock) || 0) - qty;
+          updateRow("tires", target.tireId, { stock: newStock });
+          upsertInventoryRow(target.tireId, newStock);
+        } else {
+          const invItem = (inventory || []).find(
+            (item) => String(item?.tireId) === String(target.tireId)
+          );
+          if (invItem) {
+            upsertInventoryRow(
+              target.tireId,
+              (Number(invItem.quantity) || 0) - qty
+            );
+          }
+        }
+      }
+    }
+    setDeliveries((prev) => (prev || []).filter((d) => String(d?.id) !== String(id)));
+    deleteRow("deliveries", id);
+  };
+
+  // Void a sale: remove the record, restore stock on BOTH states and sync.
+  // The ledger auto-posting tagged [sale:ID] is garbage-collected by
+  // CurrentAccount (balance reversed), so books stay consistent.
+  const deleteSale = (saleId) => {
+    const target = (sales || []).find((s) => String(s?.id) === String(saleId));
+    if (!target) return false;
+    const qty = Number(target.quantity) || 0;
+    const key = String(saleId);
+    setSales((prev) => (prev || []).filter((s) => String(s?.id) !== key));
+    if (qty > 0 && target.tireId !== undefined && target.tireId !== null) {
+      setTires((prevTires) =>
+        (prevTires || []).map((t) =>
+          String(t?.id) === String(target.tireId)
+            ? { ...t, stock: (Number(t?.stock) || 0) + qty }
+            : t
+        )
+      );
+      updateInventory(target.tireId, qty, "increase");
+      const current = (tires || []).find(
+        (t) => String(t?.id) === String(target.tireId)
+      );
+      if (current) {
+        const newStock = (Number(current.stock) || 0) + qty;
+        updateRow("tires", target.tireId, { stock: newStock });
+        upsertInventoryRow(target.tireId, newStock);
+      }
+    }
+    deleteRow("sales", saleId);
+    return true;
   };
 
   const handleDrawerToggle = () => {
@@ -335,73 +989,121 @@ const App = () => {
     setAnchorEl(null);
   };
 
-  const menuItems = [
-    {
-      text: "Gösterge Paneli",
-      icon: <DashboardIcon />,
-      component: "Dashboard",
-    },
-    { text: "Lastik Ekle", icon: <AddCircleIcon />, component: "TireForm" },
-    { text: "Lastik Listesi", icon: <ListAltIcon />, component: "TireList" },
-    { text: "Lastik Sat", icon: <SellIcon />, component: "SaleForm" },
-    { text: "Lastik Oteli", icon: <HotelIcon />, component: "TireHotel" },
+  const canSeeTeam = !isSupabaseConfigured() || (shop && shop.role === "Admin");
 
+  const navGroups = useMemo(() => [
     {
-      text: "Cari Hesap",
-      icon: <AnalyticsIcon />,
-      component: "CurrentAccount",
+      group: null, // Top-level
+      items: [
+        { text: "Dashboard", icon: <DashboardIcon />, component: "Dashboard" },
+      ],
     },
     {
-      text: "Araç Takip",
-      icon: <DirectionsCarIcon />,
-      component: "VehicleTracking",
+      group: "Inventory",
+      items: [
+        { text: "Tire List", icon: <ListAltIcon />, component: "TireList" },
+        { text: "Add Tire", icon: <AddCircleIcon />, component: "TireForm" },
+        { text: "Inventory", icon: <InventoryIcon />, component: "Inventory" },
+        { text: "Deliveries", icon: <LocalShippingIcon />, component: "Deliveries" },
+      ],
     },
     {
-      text: "İşçi Takip",
-      icon: <PersonIcon />,
-      component: "WorkerTracking",
+      group: "Sales & Accounting",
+      items: [
+        { text: "Sell Tire", icon: <SellIcon />, component: "SaleForm" },
+        { text: "Current Account", icon: <AnalyticsIcon />, component: "CurrentAccount" },
+      ],
     },
     {
-      text: "Randevu Sistemi",
-      icon: <CalendarTodayIcon />,
-      component: "AppointmentSystem",
+      group: "Service",
+      items: [
+        { text: "Tire Hotel", icon: <HotelIcon />, component: "TireHotel" },
+        { text: "Appointment System", icon: <CalendarTodayIcon />, component: "AppointmentSystem" },
+        { text: "Vehicle Tracking", icon: <DirectionsCarIcon />, component: "VehicleTracking" },
+        { text: "Worker Tracking", icon: <PersonIcon />, component: "WorkerTracking" },
+      ],
     },
-    { text: "Ayarlar", icon: <LocalShippingIcon />, component: "Settings" },
-  ];
+    {
+      group: "System",
+      items: [
+        ...(canSeeTeam
+          ? [{ text: "Team", icon: <GroupIcon />, component: "TeamManagement" }]
+          : []),
+        { text: "Settings", icon: <SettingsIcon />, component: "Settings" },
+      ],
+    },
+  ], [canSeeTeam]);
 
   const drawer = (
     <div>
       <Logo>
         <TireRepairIcon sx={{ fontSize: 40, mr: 1 }} />
         <Typography variant="h6" noWrap component="div">
-          Dost Oto Lastik
+          Black Wheel
         </Typography>
       </Logo>
       <Divider />
       <Box sx={{ p: 2, display: "flex", alignItems: "center" }}>
-        <Avatar src={user.avatar} alt={user.name} sx={{ mr: 2 }} />
+        <Avatar src={user?.avatar || ""} alt={user?.name || "User"} sx={{ mr: 2, bgcolor: "secondary.main" }}>
+          {(user?.name || "U").charAt(0).toUpperCase()}
+        </Avatar>
         <Box>
-          <Typography variant="subtitle1">{user.name}</Typography>
+          <Typography variant="subtitle1">{user?.name || "User"}</Typography>
           <Typography variant="body2" color="textSecondary">
-            {user.role}
+            {user?.role || "Staff"}
           </Typography>
+          {shop?.name && (
+            <Typography variant="caption" color="textSecondary">
+              {shop.name}
+            </Typography>
+          )}
         </Box>
       </Box>
       <Divider />
-      <List>
-        {menuItems.map((item) => (
-          <ListItem
-            button
-            key={item.text}
-            onClick={() => {
-              setSelectedComponent(item.component);
-              if (isMobile) setOpen(false);
-            }}
-            selected={selectedComponent === item.component}
-          >
-            <ListItemIcon>{item.icon}</ListItemIcon>
-            <ListItemText primary={item.text} />
-          </ListItem>
+      <List sx={{ py: 0 }}>
+        {navGroups.map((section, sIdx) => (
+          <React.Fragment key={section.group || `sec-${sIdx}`}>
+            {section.group && (
+              <ListSubheader
+                sx={{
+                  bgcolor: "transparent",
+                  color: darkMode ? "rgba(255,255,255,0.7)" : "rgba(255,255,255,0.9)",
+                  fontWeight: 700,
+                  fontSize: "0.75rem",
+                  letterSpacing: "0.08em",
+                  textTransform: "uppercase",
+                  lineHeight: "32px",
+                  mt: sIdx > 0 ? 1 : 0,
+                }}
+              >
+                {section.group}
+              </ListSubheader>
+            )}
+            {section.items.map((item) => (
+              <ListItem
+                button
+                key={item.text}
+                onClick={() => {
+                  setSelectedComponent(item.component);
+                  if (isMobile) setOpen(false);
+                }}
+                selected={selectedComponent === item.component}
+                sx={{
+                  py: 0.8,
+                  "&.Mui-selected": {
+                    backgroundColor: darkMode ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.25)",
+                    "&:hover": {
+                      backgroundColor: darkMode ? "rgba(255,255,255,0.22)" : "rgba(255,255,255,0.32)",
+                    },
+                  },
+                }}
+              >
+                <ListItemIcon sx={{ minWidth: 40 }}>{item.icon}</ListItemIcon>
+                <ListItemText primary={item.text} primaryTypographyProps={{ fontSize: "0.9rem" }} />
+              </ListItem>
+            ))}
+            {sIdx < navGroups.length - 1 && <Divider sx={{ my: 0.5, borderColor: "rgba(255,255,255,0.12)" }} />}
+          </React.Fragment>
         ))}
       </List>
     </div>
@@ -412,23 +1114,41 @@ const App = () => {
       case "Dashboard":
         return <Dashboard tires={tires} sales={sales} />;
       case "TireForm":
-        return <TireForm addTire={addTire} />;
+        return <TireForm addTire={addTire} tires={tires} />;
       case "SaleForm":
-        return <SaleForm tires={tires} addSale={addSale} />;
+        return <SaleForm tires={tires} addSale={addSale} salesHistory={sales} onDeleteSale={deleteSale} />;
       case "TireHotel":
         return (
           <TireHotel hotelTires={hotelTires} addHotelTire={addHotelTire} />
         );
       case "TireList":
-        return <TireList tires={tires} />;
+        return (
+          <TireList
+            tires={tires}
+            setTires={setTires}
+            sales={sales}
+            addSale={addSale}
+            onUpdateTire={updateTire}
+            onDeleteTire={deleteTire}
+            onDeleteSale={deleteSale}
+            onAddNew={() => setSelectedComponent("TireForm")}
+          />
+        );
       case "CurrentAccount":
-        return <CurrentAccount tires={tires} />;
+        return <CurrentAccount tires={tires} sales={sales} deliveries={deliveries} user={user} shop={shop} />;
       case "Inventory":
-        return <Inventory inventory={inventory} tires={tires} />;
+        return (
+          <Inventory
+            inventory={inventory}
+            tires={tires}
+            onPurgeOrphans={purgeOrphanRecords}
+            onResync={resyncInventoryFromTires}
+          />
+        );
       case "VehicleTracking":
         return <VehicleTracking />;
       case "WorkerTracking":
-        return <WorkerTracking />;
+        return <WorkerTracking user={user} shop={shop} />;
       case "AppointmentSystem":
         return <AppointmentSystem />;
       case "Deliveries":
@@ -436,13 +1156,79 @@ const App = () => {
           <Deliveries
             deliveries={deliveries}
             addDelivery={addDelivery}
+            onDeleteDelivery={deleteDelivery}
             tires={tires}
+          />
+        );
+      case "Settings":
+        return <Settings />;
+      case "TeamManagement":
+        return (
+          <TeamManagement
+            shop={shop}
+            currentUser={user}
+            onShopRenamed={(name) =>
+              setShop((prev) => (prev ? { ...prev, name } : prev))
+            }
           />
         );
       default:
         return <Dashboard tires={tires} sales={sales} />;
     }
   };
+
+  if (!user) {
+    return (
+      <ThemeProvider theme={theme}>
+        <CssBaseline />
+        <ErrorBoundary>
+          <Suspense fallback={<Box sx={{ display: "flex", justifyContent: "center", p: 4 }}><CircularProgress /></Box>}>
+            <AuthModal
+              darkMode={darkMode}
+              onToggleDarkMode={() => setDarkMode((prev) => !prev)}
+            onLoginSuccess={(u) => {
+              if (!u) return;
+              if (isSupabaseConfigured()) {
+                // Memberships already resolved by AuthModal; enter silently or gate.
+                enterMemberships(u, u.memberships || []);
+              } else {
+                setUser(u);
+                try {
+                  localStorage.setItem("blackwheel_auth_user", JSON.stringify(u));
+                } catch (e) {
+                  // ignore
+                }
+              }
+            }}
+            />
+          </Suspense>
+        </ErrorBoundary>
+      </ThemeProvider>
+    );
+  }
+
+  // Cloud mode with no active shop: create, join or switch (multi-tenant gate).
+  if (isSupabaseConfigured() && !shop) {
+    return (
+      <ThemeProvider theme={theme}>
+        <CssBaseline />
+        <ErrorBoundary>
+          <Suspense fallback={<Box sx={{ display: "flex", justifyContent: "center", p: 4 }}><CircularProgress /></Box>}>
+            <ShopGate
+              authUser={user}
+              memberships={user.memberships || []}
+              onEnter={(m) => {
+                if (!m) return;
+                setShop({ id: m.shopId, name: m.shopName, role: m.role, profileId: m.profileId });
+                setUser((prev) => (prev ? { ...prev, role: m.role } : prev));
+              }}
+              onSignOut={handleSignOut}
+            />
+          </Suspense>
+        </ErrorBoundary>
+      </ThemeProvider>
+    );
+  }
 
   return (
     <ThemeProvider theme={theme}>
@@ -466,13 +1252,18 @@ const App = () => {
                 component="div"
                 sx={{ flexGrow: 1 }}
               >
-                {selectedComponent}
+                {componentTitles[selectedComponent] || selectedComponent}
               </Typography>
-              <IconButton color="inherit" onClick={() => setNotifications(0)}>
-                <StyledBadge badgeContent={notifications} color="secondary">
-                  <NotificationsIcon />
-                </StyledBadge>
-              </IconButton>
+              <Tooltip title={lowStockCount > 0 ? `${lowStockCount} tire(s) with low stock (≤ threshold)` : "All tires have adequate stock"}>
+                <IconButton
+                  color="inherit"
+                  onClick={() => setSelectedComponent("Inventory")}
+                >
+                  <StyledBadge badgeContent={lowStockCount} color="error">
+                    <NotificationsIcon />
+                  </StyledBadge>
+                </IconButton>
+              </Tooltip>
               <IconButton
                 sx={{ ml: 1 }}
                 onClick={toggleDarkMode}
@@ -480,13 +1271,15 @@ const App = () => {
               >
                 {darkMode ? <Brightness7Icon /> : <Brightness4Icon />}
               </IconButton>
-              <Tooltip title="Hesap ayarları">
+              <Tooltip title={user?.name || "Account settings"}>
                 <IconButton onClick={handleMenu} color="inherit">
                   <Avatar
-                    src={user.avatar}
-                    alt={user.name}
-                    sx={{ width: 32, height: 32 }}
-                  />
+                    src={user?.avatar || ""}
+                    alt={user?.name || "User"}
+                    sx={{ width: 32, height: 32, bgcolor: "secondary.main", fontSize: 14 }}
+                  >
+                    {(user?.name || "U").charAt(0).toUpperCase()}
+                  </Avatar>
                 </IconButton>
               </Tooltip>
               <Menu
@@ -504,17 +1297,42 @@ const App = () => {
                 open={Boolean(anchorEl)}
                 onClose={handleClose}
               >
-                <MenuItem onClick={handleClose}>
+                <MenuItem
+                  onClick={() => {
+                    setSelectedComponent("Settings");
+                    handleClose();
+                  }}
+                >
                   <ListItemIcon>
                     <SettingsIcon fontSize="small" />
                   </ListItemIcon>
-                  <Typography variant="inherit">Ayarlar</Typography>
+                  <Typography variant="inherit">Settings</Typography>
                 </MenuItem>
-                <MenuItem onClick={handleClose}>
+                {isSupabaseConfigured() && (
+                  <MenuItem
+                    onClick={() => {
+                      handleClose();
+                      setCurrentShopId("");
+                      setShop(null);
+                      setSelectedComponent("Dashboard");
+                    }}
+                  >
+                    <ListItemIcon>
+                      <StoreIcon fontSize="small" />
+                    </ListItemIcon>
+                    <Typography variant="inherit">Switch shop</Typography>
+                  </MenuItem>
+                )}
+                <MenuItem
+                  onClick={async () => {
+                    handleClose();
+                    await handleSignOut();
+                  }}
+                >
                   <ListItemIcon>
                     <ExitToAppIcon fontSize="small" />
                   </ListItemIcon>
-                  <Typography variant="inherit">Çıkış Yap</Typography>
+                  <Typography variant="inherit">Logout</Typography>
                 </MenuItem>
               </Menu>
             </Toolbar>
@@ -556,9 +1374,36 @@ const App = () => {
           <Main open={open}>
             <DrawerHeader />
             <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
+              {storageWarning && (
+                <Paper
+                  elevation={0}
+                  sx={{
+                    p: 2,
+                    mb: 2,
+                    borderRadius: "8px",
+                    bgcolor: "warning.light",
+                    border: "1px solid",
+                    borderColor: "warning.main",
+                  }}
+                >
+                  <Typography variant="body2" color="textSecondary">
+                    {storageWarning}{" "}
+                    <span
+                      style={{ textDecoration: "underline", cursor: "pointer" }}
+                      onClick={() => setStorageWarning("")}
+                    >
+                      Dismiss
+                    </span>
+                  </Typography>
+                </Paper>
+              )}
               <Fade in={true} timeout={1000}>
                 <Paper elevation={3} sx={{ p: 2, borderRadius: "8px" }}>
-                  {renderComponent()}
+                  <ErrorBoundary>
+                    <Suspense fallback={<Box sx={{ display: "flex", justifyContent: "center", p: 4 }}><CircularProgress /></Box>}>
+                      {renderComponent()}
+                    </Suspense>
+                  </ErrorBoundary>
                 </Paper>
               </Fade>
             </Container>

@@ -1,6 +1,6 @@
-# Tire Management System
+# Black Wheel
 
-The Tire Management System is a comprehensive React application specifically designed for auto tire shops and large tire warehouses. This system has been developed to optimize tire inventory management, sales tracking, and customer services.
+Black Wheel (Tire Management System) is a comprehensive React application specifically designed for auto tire shops and large tire warehouses. This system has been developed to optimize tire inventory management, sales tracking, and customer services.
 
 ## Features
 
@@ -99,4 +99,4 @@ If you have any questions or suggestions, please feel free to contact me via ema
 
 ---
 
-Tire Management System is developed by Yusuf Aykın. All rights reserved.
+Black Wheel is developed by Yusuf Aykın. All rights reserved.

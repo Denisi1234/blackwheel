@@ -1,19 +1,38 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
     TextField, Button, Paper, Grid, Typography, Dialog, DialogActions,
     DialogContent, DialogTitle, IconButton, List, ListItem, ListItemText,
     Divider, FormControl, InputLabel, Select, MenuItem, Tooltip, Snackbar,
-    Alert, Avatar, Card, CardContent, Box, Chip, AppBar, Toolbar, Container
+    Alert, Avatar, Card, CardContent, Box, Chip, AppBar, Toolbar, Container,
+    CircularProgress
 } from '@mui/material';
+import SuccessModal from './SuccessModal';
 import {
-    Add, Search, Edit, Delete, Download, DirectionsCar, Build,
-    EventNote, AttachMoney, Notifications
+    Add, Search, Edit, Delete, Download, DirectionsCar, Notifications
 } from '@mui/icons-material';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 import { LocalizationProvider, DatePicker } from '@mui/x-date-pickers';
 import { format, addDays, isBefore, isAfter } from 'date-fns';
-import jsPDF from 'jspdf';
+import { jsPDF } from 'jspdf';
 import 'jspdf-autotable';
+import { getCurrency, formatMoney } from '../lib/settings';
+import {
+  loadTable,
+  insertRow,
+  updateRow,
+  deleteRow,
+  newId,
+  isUuid,
+} from '../lib/store';
+import {
+  paintHeader,
+  paintFooter,
+  moneyTable,
+  money,
+  fmtDate,
+  sectionCaption,
+  datedName,
+} from '../lib/documents';
 import { Line } from 'react-chartjs-2';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip as ChartTooltip, Legend } from 'chart.js';
 
@@ -36,35 +55,97 @@ const VehicleTracking = () => {
     const [editingService, setEditingService] = useState(null);
     const [filter, setFilter] = useState('');
     const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
+    const [isSaving, setIsSaving] = useState(false);
+    const [isUpdating, setIsUpdating] = useState(false);
+    const [successModal, setSuccessModal] = useState({ open: false, title: '', message: '', details: [] });
     const [statistics, setStatistics] = useState({
         totalVehicles: 0,
         totalServices: 0,
         totalRevenue: 0,
     });
     const [upcomingServices, setUpcomingServices] = useState([]);
+    const loadedRef = useRef(false);
 
+    const withIds = (list) =>
+      (Array.isArray(list) ? list : []).map((v) => {
+        const vehicle = { ...v, id: v.id ?? newId(), services: v.services || [] };
+        vehicle.services = vehicle.services.map((s) =>
+          s && typeof s === "object"
+            ? { ...s, id: s.id ?? newId(), vehicleId: vehicle.id }
+            : s
+        );
+        return vehicle;
+      });
+
+    // Supabase-first (vehicles + services joined); localStorage fallback.
     useEffect(() => {
-        const savedVehicles = JSON.parse(localStorage.getItem('vehicles')) || [];
-        setVehicles(savedVehicles);
-        updateStatistics(savedVehicles);
-        updateUpcomingServices(savedVehicles);
+        const loadAll = async () => {
+            try {
+                const [remoteVehicles, remoteServices] = await Promise.all([
+                    loadTable("vehicles"),
+                    loadTable("services"),
+                ]);
+                if (remoteVehicles !== null && remoteServices !== null) {
+                    const byVehicle = {};
+                    (remoteServices || []).forEach((s) => {
+                        if (!s) return;
+                        const k = String(s.vehicleId ?? "");
+                        if (!k) return;
+                        (byVehicle[k] = byVehicle[k] || []).push(s);
+                    });
+                    const joined = (remoteVehicles || []).map((v) => ({
+                        ...v,
+                        services: byVehicle[String(v.id)] || [],
+                    }));
+                    setVehicles(joined);
+                    updateStatistics(joined);
+                    updateUpcomingServices(joined);
+                } else {
+                    const raw = localStorage.getItem('vehicles');
+                    const savedVehicles = raw ? JSON.parse(raw) : [];
+                    const normalized = withIds(
+                        Array.isArray(savedVehicles)
+                          ? savedVehicles.map((v) => ({ ...v, services: v.services || [] }))
+                          : []
+                    );
+                    setVehicles(normalized);
+                    updateStatistics(normalized);
+                    updateUpcomingServices(normalized);
+                }
+            } catch (e) {
+                setVehicles([]);
+                updateStatistics([]);
+                updateUpcomingServices([]);
+            } finally {
+                loadedRef.current = true;
+            }
+        };
+        loadAll();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     useEffect(() => {
-        localStorage.setItem('vehicles', JSON.stringify(vehicles));
+        if (!loadedRef.current) return;
+        try {
+            localStorage.setItem('vehicles', JSON.stringify(vehicles));
+        } catch (e) {
+            // storage unavailable
+        }
         updateStatistics(vehicles);
         updateUpcomingServices(vehicles);
     }, [vehicles]);
 
     const updateStatistics = (vehicleData) => {
-        const totalVehicles = vehicleData.length;
+        const safeData = Array.isArray(vehicleData) ? vehicleData : [];
+        const totalVehicles = safeData.length;
         let totalServices = 0;
         let totalRevenue = 0;
 
-        vehicleData.forEach(vehicle => {
-            totalServices += vehicle.services.length;
-            vehicle.services.forEach(service => {
-                totalRevenue += parseFloat(service.cost);
+        safeData.forEach(vehicle => {
+            const services = vehicle.services || [];
+            totalServices += services.length;
+            services.forEach(service => {
+                totalRevenue += parseFloat(service.cost) || 0;
             });
         });
 
@@ -72,9 +153,14 @@ const VehicleTracking = () => {
     };
 
     const updateUpcomingServices = (vehicleData) => {
-        const upcoming = vehicleData.flatMap(vehicle =>
-            vehicle.services
-                .filter(service => isAfter(new Date(service.nextServiceDate), new Date()))
+        const safeData = Array.isArray(vehicleData) ? vehicleData : [];
+        const upcoming = safeData.flatMap(vehicle =>
+            (vehicle.services || [])
+                .filter(service => {
+                    if (!service.nextServiceDate) return false;
+                    const d = new Date(service.nextServiceDate);
+                    return !Number.isNaN(d.getTime()) && isAfter(d, new Date());
+                })
                 .map(service => ({
                     ...service,
                     licensePlate: vehicle.licensePlate
@@ -85,98 +171,212 @@ const VehicleTracking = () => {
     };
 
     const handleSearch = () => {
-        const vehicle = vehicles.find(v => v.licensePlate.toLowerCase() === searchPlate.toLowerCase());
+        const plate = (searchPlate || '').toLowerCase();
+        const vehicle = vehicles.find(v => (v.licensePlate || '').toLowerCase() === plate);
         if (vehicle) {
             setSelectedVehicle(vehicle);
-            showSnackbar('Araç bulundu.', 'success');
+            showSnackbar('Vehicle found.', 'success');
         } else {
-            setSelectedVehicle({ licensePlate: searchPlate, services: [] });
-            showSnackbar('Yeni araç kaydı oluşturuldu.', 'info');
+            setSelectedVehicle({ id: newId(), licensePlate: searchPlate, services: [] });
+            showSnackbar('New vehicle record created.', 'info');
         }
     };
 
     const handleAddService = () => {
         if (Object.values(newService).some(field => field === '')) {
-            showSnackbar('Lütfen tüm alanları doldurun.', 'error');
+            showSnackbar('Please fill in all fields.', 'error');
             return;
         }
-        const formattedService = {
-            ...newService,
-            date: format(newService.date, 'yyyy-MM-dd'),
-            nextServiceDate: format(newService.nextServiceDate, 'yyyy-MM-dd'),
-        };
+        if (!newService.date || !newService.nextServiceDate) {
+            showSnackbar('Please select valid dates.', 'error');
+            return;
+        }
+        const costNum = parseFloat(newService.cost);
+        if (Number.isNaN(costNum) || costNum < 0) {
+            showSnackbar('Cost must be a number >= 0.', 'error');
+            return;
+        }
+        let formattedService;
+        try {
+            formattedService = {
+                id: newId(),
+                vehicleId: selectedVehicle.id ?? null,
+                ...newService,
+                cost: String(costNum),
+                date: format(newService.date, 'yyyy-MM-dd'),
+                nextServiceDate: format(newService.nextServiceDate, 'yyyy-MM-dd'),
+            };
+        } catch (e) {
+            showSnackbar('Invalid date value.', 'error');
+            return;
+        }
+        setIsSaving(true);
+        const snapshot = { ...formattedService };
+        setTimeout(() => {
+            const currentServices = selectedVehicle.services || [];
+            const updatedVehicle = {
+                ...selectedVehicle,
+                services: [...currentServices, formattedService]
+            };
+            setVehicles(prevVehicles => {
+                const updatedVehicles = prevVehicles.some(v => v.licensePlate === updatedVehicle.licensePlate)
+                    ? prevVehicles.map(v => v.licensePlate === updatedVehicle.licensePlate ? updatedVehicle : v)
+                    : [...prevVehicles, updatedVehicle];
+                return updatedVehicles;
+            });
+            // Remote mirror: vehicle row first (FK), then the service row.
+            if (isUuid(updatedVehicle.id) && isUuid(formattedService.id)) {
+                insertRow("vehicles", {
+                    id: updatedVehicle.id,
+                    licensePlate: updatedVehicle.licensePlate,
+                }).then(() => insertRow("services", formattedService));
+            }
+            setSelectedVehicle(updatedVehicle);
+            resetNewServiceForm();
+            setOpenForm(false);
+            setIsSaving(false);
+            showSnackbar('New service added successfully.', 'success');
+            setSuccessModal({
+                open: true,
+                title: 'Service Added',
+                message: 'The new service record has been added successfully.',
+                details: [
+                    { label: 'Plate', value: snapshot.licensePlate || selectedVehicle?.licensePlate || '-' },
+                    { label: 'Mechanic', value: snapshot.mechanicName || '-' },
+                    { label: 'Work', value: snapshot.workDone || '-' },
+                    { label: 'Cost', value: snapshot.cost ? formatMoney(snapshot.cost, getCurrency()) : '-' },
+                ],
+            });
+        }, 600);
+    };
+
+    const handleEditService = (service, originalIndex) => {
+        const index = typeof originalIndex === 'number' ? originalIndex : service.originalIndex ?? service.index;
+        if (index === undefined || index === null) return;
+        const { originalIndex: _oi, index: _i, ...cleanService } = service;
+        const costNum = parseFloat(cleanService.cost);
+        if (Number.isNaN(costNum) || costNum < 0) {
+            showSnackbar('Cost must be a number >= 0.', 'error');
+            return;
+        }
+        setIsUpdating(true);
+        const snapshot = { ...cleanService, cost: String(costNum) };
+        setTimeout(() => {
+            const currentServices = [...(selectedVehicle.services || [])];
+            currentServices[index] = { ...cleanService, cost: String(costNum) };
+            const updatedVehicle = { ...selectedVehicle, services: currentServices };
+            setVehicles(vehicles.map(v => v.licensePlate === updatedVehicle.licensePlate ? updatedVehicle : v));
+            const savedService = currentServices[index];
+            if (savedService && isUuid(savedService.id)) {
+                updateRow("services", savedService.id, savedService);
+            }
+            setSelectedVehicle(updatedVehicle);
+            setEditingService(null);
+            setIsUpdating(false);
+            showSnackbar('Service updated successfully.', 'success');
+            setSuccessModal({
+                open: true,
+                title: 'Service Updated',
+                message: 'The service record has been updated successfully.',
+                details: [
+                    { label: 'Plate', value: updatedVehicle.licensePlate || '-' },
+                    { label: 'Mechanic', value: snapshot.mechanicName || '-' },
+                    { label: 'Work', value: snapshot.workDone || '-' },
+                    { label: 'Cost', value: snapshot.cost ? formatMoney(snapshot.cost, getCurrency()) : '-' },
+                ],
+            });
+        }, 600);
+    };
+
+    const handleDeleteService = (originalIndex) => {
+        const currentServices = selectedVehicle.services || [];
+        const removed = currentServices[originalIndex];
         const updatedVehicle = {
             ...selectedVehicle,
-            services: [...selectedVehicle.services, formattedService]
+            services: currentServices.filter((_, i) => i !== originalIndex)
         };
-        setVehicles(prevVehicles => {
-            const updatedVehicles = prevVehicles.some(v => v.licensePlate === updatedVehicle.licensePlate)
-                ? prevVehicles.map(v => v.licensePlate === updatedVehicle.licensePlate ? updatedVehicle : v)
-                : [...prevVehicles, updatedVehicle];
-            return updatedVehicles;
+        setVehicles(vehicles.map(v => v.licensePlate === updatedVehicle.licensePlate ? updatedVehicle : v));
+        if (removed && isUuid(removed.id)) deleteRow("services", removed.id);
+        setSelectedVehicle(updatedVehicle);
+        showSnackbar('Service deleted successfully.', 'success');
+    };
+
+    const handleDeleteVehicle = () => {
+        if (!selectedVehicle) return;
+        const plate = selectedVehicle.licensePlate || 'this vehicle';
+        const ok =
+            typeof window === 'undefined' ||
+            window.confirm(`Delete ${plate} and all its service records? This cannot be undone.`);
+        if (!ok) return;
+        const vid = selectedVehicle.id;
+        const plateKey = selectedVehicle.licensePlate;
+        setVehicles((prev) => (prev || []).filter((v) =>
+            vid !== undefined && vid !== null
+                ? String(v?.id) !== String(vid)
+                : (v?.licensePlate || '').toLowerCase() !== String(plateKey || '').toLowerCase()
+        ));
+        // Remote services cascade via FK; delete explicitly too for safety.
+        (selectedVehicle.services || []).forEach((s) => {
+            if (s && isUuid(s.id)) deleteRow("services", s.id);
         });
-        setSelectedVehicle(updatedVehicle);
-        resetNewServiceForm();
-        setOpenForm(false);
-        showSnackbar('Yeni servis başarıyla eklendi.', 'success');
-    };
-
-    const handleEditService = (service, index) => {
-        const updatedServices = [...selectedVehicle.services];
-        updatedServices[index] = service;
-        const updatedVehicle = { ...selectedVehicle, services: updatedServices };
-        setVehicles(vehicles.map(v => v.licensePlate === updatedVehicle.licensePlate ? updatedVehicle : v));
-        setSelectedVehicle(updatedVehicle);
+        if (isUuid(vid)) deleteRow("vehicles", vid);
+        setSelectedVehicle(null);
         setEditingService(null);
-        showSnackbar('Servis başarıyla güncellendi.', 'success');
-    };
-
-    const handleDeleteService = (index) => {
-        const updatedVehicle = {
-            ...selectedVehicle,
-            services: selectedVehicle.services.filter((_, i) => i !== index)
-        };
-        setVehicles(vehicles.map(v => v.licensePlate === updatedVehicle.licensePlate ? updatedVehicle : v));
-        setSelectedVehicle(updatedVehicle);
-        showSnackbar('Servis başarıyla silindi.', 'success');
+        showSnackbar('Vehicle deleted successfully.', 'success');
     };
 
     const generatePDF = () => {
+        if (!selectedVehicle) return;
         const doc = new jsPDF();
-        doc.setFontSize(18);
-        doc.text(`Araç Servis Geçmişi - ${selectedVehicle.licensePlate}`, 14, 22);
+        const startY = paintHeader(doc, {
+            title: 'Service History',
+            refNo: selectedVehicle.licensePlate,
+        });
+        let y = sectionCaption(doc, 'Vehicle', startY);
+        doc.setFont('helvetica', 'bold');
         doc.setFontSize(12);
-        doc.text(`Oluşturulma Tarihi: ${format(new Date(), 'dd.MM.yyyy')}`, 14, 32);
+        doc.setTextColor(15, 23, 42);
+        doc.text(String(selectedVehicle.licensePlate || '—').slice(0, 40), 14, y + 1);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+        doc.setTextColor(100, 116, 139);
+        const services = selectedVehicle.services || [];
+        const totalCost = services.reduce((s, x) => s + (parseFloat(x.cost) || 0), 0);
+        doc.text(
+            `${services.length} service(s)  ·  Total ${money(totalCost, getCurrency())}`,
+            14,
+            y + 7
+        );
 
-        const services = selectedVehicle.services.map(service => [
-            service.date,
-            service.mechanicName,
-            service.workDone,
-            `₺${service.cost}`,
-            service.nextServiceDate
+        const rows = services.map(service => [
+            fmtDate(service.date),
+            String(service.mechanicName || '—').slice(0, 24),
+            String(service.workDone || '—').slice(0, 60),
+            money(service.cost, getCurrency()),
+            fmtDate(service.nextServiceDate),
         ]);
 
-        doc.autoTable({
-            head: [['Tarih', 'Usta Adı', 'Yapılan İşlem', 'Ücret', 'Sonraki Servis']],
-            body: services,
-            startY: 40,
-            theme: 'grid',
-            styles: { fontSize: 8 },
-            headStyles: { fillColor: [66, 139, 202] },
+        y = moneyTable(doc, {
+            startY: y + 12,
+            head: [['Date', 'Mechanic', 'Work Done', 'Cost', 'Next Service']],
+            body: rows.length > 0 ? rows : [['—', 'No services recorded', '', '', '']],
+            foot: [['', '', 'Total:', money(totalCost, getCurrency()), '']],
+            moneyCols: [3],
         });
-
-        doc.save(`${selectedVehicle.licensePlate}_Servis_Gecmisi.pdf`);
+        paintFooter(doc, `Service history ${selectedVehicle.licensePlate || ''}`);
+        doc.save(datedName(`${selectedVehicle.licensePlate || 'vehicle'}_Service_History`, 'pdf'));
     };
 
     const getChartData = () => {
-        const dates = selectedVehicle.services.map(s => s.date);
-        const costs = selectedVehicle.services.map(s => parseFloat(s.cost));
+        const list = selectedVehicle.services || [];
+        const dates = list.map(s => s.date);
+        const costs = list.map(s => parseFloat(s.cost) || 0);
 
         return {
             labels: dates,
             datasets: [
                 {
-                    label: 'Servis Maliyeti',
+                    label: 'Service Cost',
                     data: costs,
                     fill: false,
                     borderColor: 'rgb(75, 192, 192)',
@@ -216,7 +416,7 @@ const VehicleTracking = () => {
                     <Toolbar>
                         <DirectionsCar sx={{ mr: 2 }} />
                         <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
-                            Araç Takip Sistemi
+                            Vehicle Tracking System
                         </Typography>
                     </Toolbar>
                 </AppBar>
@@ -227,16 +427,16 @@ const VehicleTracking = () => {
                             <Card>
                                 <CardContent>
                                     <Typography variant="h6" gutterBottom>
-                                        İstatistikler
+                                        Statistics
                                     </Typography>
                                     <Typography variant="body1">
-                                        Toplam Araç: {statistics.totalVehicles}
+                                        Total Vehicles: {statistics.totalVehicles}
                                     </Typography>
                                     <Typography variant="body1">
-                                        Toplam Servis: {statistics.totalServices}
+                                        Total Services: {statistics.totalServices}
                                     </Typography>
                                     <Typography variant="body1">
-                                        Toplam Gelir: ₺{statistics.totalRevenue.toFixed(2)}
+                                        Total Revenue: {formatMoney(statistics.totalRevenue, getCurrency())}
                                     </Typography>
                                 </CardContent>
                             </Card>
@@ -246,7 +446,7 @@ const VehicleTracking = () => {
                             <Card>
                                 <CardContent>
                                     <Typography variant="h6" gutterBottom>
-                                        Yaklaşan Servisler
+                                        Upcoming Services
                                     </Typography>
                                     {upcomingServices.map((service, index) => (
                                         <Chip
@@ -267,7 +467,7 @@ const VehicleTracking = () => {
                                 <Grid container spacing={2} alignItems="center">
                                     <Grid item xs={12} sm={8}>
                                         <TextField
-                                            label="Plakaya Göre Ara"
+                                            label="Search by License Plate"
                                             value={searchPlate}
                                             onChange={(e) => setSearchPlate(e.target.value)}
                                             fullWidth
@@ -281,7 +481,7 @@ const VehicleTracking = () => {
                                             onClick={handleSearch}
                                             fullWidth
                                         >
-                                            Ara
+                                            Search
                                         </Button>
                                     </Grid>
                                 </Grid>
@@ -292,45 +492,48 @@ const VehicleTracking = () => {
                             <Grid item xs={12}>
                                 <Paper sx={{ p: 2 }}>
                                     <Typography variant="h6" gutterBottom>
-                                        Araç Bilgileri - {selectedVehicle.licensePlate}
+                                        Vehicle Information - {selectedVehicle.licensePlate}
                                     </Typography>
                                     <Grid container spacing={2}>
                                         <Grid item xs={12} md={6}>
                                             <FormControl fullWidth margin="normal">
-                                                <InputLabel>Filtrele</InputLabel>
+                                                <InputLabel>Filter</InputLabel>
                                                 <Select
                                                     value={filter}
                                                     onChange={(e) => setFilter(e.target.value)}
                                                 >
-                                                    <MenuItem value="">Tümü</MenuItem>
-                                                    <MenuItem value="recent">Son Eklenenler</MenuItem>
-                                                    <MenuItem value="upcoming">Yaklaşan Servisler</MenuItem>
+                                                    <MenuItem value="">All</MenuItem>
+                                                    <MenuItem value="recent">Recently Added</MenuItem>
+                                                    <MenuItem value="upcoming">Upcoming Services</MenuItem>
                                                 </Select>
                                             </FormControl>
-                                            {selectedVehicle.services.length > 0 ? (
+                                            {(selectedVehicle.services || []).length > 0 ? (
                                                 <List>
-                                                    {selectedVehicle.services
-                                                        .filter(service => {
+                                                    {(selectedVehicle.services || [])
+                                                        .map((service, originalIndex) => ({ service, originalIndex }))
+                                                        .filter(({ service }) => {
                                                             if (filter === 'recent') {
-                                                                return isAfter(new Date(service.date), addDays(new Date(), -30));
+                                                                const d = service.date ? new Date(service.date) : null;
+                                                                return d && !Number.isNaN(d.getTime()) && isAfter(d, addDays(new Date(), -30));
                                                             } else if (filter === 'upcoming') {
-                                                                return isAfter(new Date(service.nextServiceDate), new Date()) &&
-                                                                    isBefore(new Date(service.nextServiceDate), addDays(new Date(), 30));
+                                                                const d = service.nextServiceDate ? new Date(service.nextServiceDate) : null;
+                                                                return d && !Number.isNaN(d.getTime()) && isAfter(d, new Date()) &&
+                                                                    isBefore(d, addDays(new Date(), 30));
                                                             }
                                                             return true;
                                                         })
-                                                        .map((service, index) => (
-                                                        <React.Fragment key={index}>
+                                                        .map(({ service, originalIndex }) => (
+                                                        <React.Fragment key={originalIndex}>
                                                             <ListItem>
                                                                 <Avatar sx={{ bgcolor: 'secondary.main', mr: 2 }}>
-                                                                    {service.mechanicName[0]}
+                                                                    {(service.mechanicName || '?')[0]}
                                                                 </Avatar>
                                                                 <ListItemText
                                                                     primary={
                                                                         <Typography variant="subtitle1">
                                                                             {service.date} - {service.workDone}
                                                                             <Chip 
-                                                                                label={`₺${service.cost}`}
+                                                                                label={formatMoney(service.cost, getCurrency())}
                                                                                 size="small"
                                                                                 color="primary"
                                                                                 sx={{ ml: 1 }}
@@ -340,21 +543,21 @@ const VehicleTracking = () => {
                                                                     secondary={
                                                                         <>
                                                                             <Typography variant="body2">
-                                                                                Usta: {service.mechanicName}
+                                                                                Mechanic: {service.mechanicName}
                                                                             </Typography>
                                                                             <Typography variant="body2">
-                                                                                Sonraki Servis: {service.nextServiceDate}
+                                                                                Next Service: {service.nextServiceDate}
                                                                             </Typography>
                                                                         </>
                                                                     }
                                                                 />
-                                                                <Tooltip title="Düzenle">
-                                                                    <IconButton color="primary" onClick={() => setEditingService({ ...service, index })}>
+                                                                <Tooltip title="Edit">
+                                                                    <IconButton color="primary" onClick={() => setEditingService({ ...service, originalIndex })}>
                                                                         <Edit />
                                                                     </IconButton>
                                                                 </Tooltip>
-                                                                <Tooltip title="Sil">
-                                                                    <IconButton color="secondary" onClick={() => handleDeleteService(index)}>
+                                                                <Tooltip title="Delete">
+                                                                    <IconButton color="secondary" onClick={() => handleDeleteService(originalIndex)}>
                                                                         <Delete />
                                                                     </IconButton>
                                                                 </Tooltip>
@@ -364,7 +567,7 @@ const VehicleTracking = () => {
                                                     ))}
                                                 </List>
                                             ) : (
-                                                <Typography>Bu araç için işlem bulunamadı.</Typography>
+                                                <Typography>No records found for this vehicle.</Typography>
                                             )}
                                             <Button
                                                 variant="contained"
@@ -373,24 +576,33 @@ const VehicleTracking = () => {
                                                 onClick={() => setOpenForm(true)}
                                                 sx={{ mt: 2, mr: 1 }}
                                             >
-                                                Yeni İşlem Ekle
+                                                Add New Service
                                             </Button>
                                             <Button
                                                 variant="outlined"
                                                 color="secondary"
                                                 startIcon={<Download />}
                                                 onClick={generatePDF}
+                                                sx={{ mt: 2, mr: 1 }}
+                                            >
+                                                Download PDF
+                                            </Button>
+                                            <Button
+                                                variant="outlined"
+                                                color="error"
+                                                startIcon={<Delete />}
+                                                onClick={handleDeleteVehicle}
                                                 sx={{ mt: 2 }}
                                             >
-                                                PDF İndir
+                                                Delete Vehicle
                                             </Button>
                                         </Grid>
                                         <Grid item xs={12} md={6}>
-                                            <Typography variant="h6" gutterBottom>Servis Maliyet Grafiği</Typography>
-                                            {selectedVehicle.services.length > 0 ? (
+                                            <Typography variant="h6" gutterBottom>Service Cost Chart</Typography>
+                                            {(selectedVehicle.services || []).length > 0 ? (
                                                 <Line data={getChartData()} />
                                             ) : (
-                                                <Typography>Grafik için yeterli veri yok.</Typography>
+                                                <Typography>Not enough data for chart.</Typography>
                                             )}
                                         </Grid>
                                     </Grid>
@@ -400,38 +612,38 @@ const VehicleTracking = () => {
                     </Grid>
 
 
-        <Dialog open={openForm} onClose={() => setOpenForm(false)}>
-            <DialogTitle>Yeni İşlem Ekle</DialogTitle>
+        <Dialog open={openForm} onClose={() => setOpenForm(false)} maxWidth="sm" fullWidth>
+            <DialogTitle>Add New Service</DialogTitle>
             <DialogContent>
                 <TextField
-                    label="Müşteri Adı"
+                    label="Customer Name"
                     value={newService.customerName}
                     onChange={(e) => setNewService({ ...newService, customerName: e.target.value })}
                     fullWidth
                     margin="dense"
                 />
                 <TextField
-                    label="Plaka"
+                    label="License Plate"
                     value={newService.licensePlate}
                     onChange={(e) => setNewService({ ...newService, licensePlate: e.target.value })}
                     fullWidth
                     margin="dense"
                 />
                 <DatePicker
-                    label="Tarih"
-                    value={newService.date}
+                    label="Date"
+                    value={newService.date || null}
                     onChange={(newDate) => setNewService({ ...newService, date: newDate })}
-                    renderInput={(params) => <TextField {...params} fullWidth margin="dense" />}
+                    slotProps={{ textField: { fullWidth: true, margin: 'dense' } }}
                 />
                 <TextField
-                    label="Usta Adı"
+                    label="Mechanic Name"
                     value={newService.mechanicName}
                     onChange={(e) => setNewService({ ...newService, mechanicName: e.target.value })}
                     fullWidth
                     margin="dense"
                 />
                 <TextField
-                    label="Yapılan İşlem"
+                    label="Work Done"
                     value={newService.workDone}
                     onChange={(e) => setNewService({ ...newService, workDone: e.target.value })}
                     fullWidth
@@ -440,49 +652,50 @@ const VehicleTracking = () => {
                     rows={3}
                 />
                 <TextField
-                    label="Ücret"
+                    label="Cost"
                     value={newService.cost}
                     onChange={(e) => setNewService({ ...newService, cost: e.target.value })}
                     fullWidth
                     margin="dense"
                     type="number"
+                    inputProps={{ min: 0 }}
                 />
                 <DatePicker
-                    label="Sonraki Servis Tarihi"
-                    value={newService.nextServiceDate}
+                    label="Next Service Date"
+                    value={newService.nextServiceDate || null}
                     onChange={(newDate) => setNewService({ ...newService, nextServiceDate: newDate })}
-                    renderInput={(params) => <TextField {...params} fullWidth margin="dense" />}
+                    slotProps={{ textField: { fullWidth: true, margin: 'dense' } }}
                 />
             </DialogContent>
             <DialogActions>
-                <Button onClick={handleAddService} color="primary">
-                    Ekle
+                <Button onClick={handleAddService} color="primary" variant="contained" disabled={isSaving} startIcon={isSaving ? <CircularProgress size={20} color="inherit" /> : null}>
+                    {isSaving ? 'Saving...' : 'Add'}
                 </Button>
-                <Button onClick={() => setOpenForm(false)} color="secondary">
-                    İptal
+                <Button onClick={() => setOpenForm(false)} color="secondary" disabled={isSaving}>
+                    Cancel
                 </Button>
             </DialogActions>
         </Dialog>
 
         {editingService && (
-            <Dialog open={!!editingService} onClose={() => setEditingService(null)}>
-                <DialogTitle>Servisi Düzenle</DialogTitle>
+            <Dialog open={!!editingService} onClose={() => setEditingService(null)} maxWidth="sm" fullWidth>
+                <DialogTitle>Edit Service</DialogTitle>
                 <DialogContent>
                     <DatePicker
-                        label="Tarih"
-                        value={new Date(editingService.date)}
-                        onChange={(newDate) => setEditingService({ ...editingService, date: format(newDate, 'yyyy-MM-dd') })}
-                        renderInput={(params) => <TextField {...params} fullWidth margin="dense" />}
+                        label="Date"
+                        value={editingService.date ? new Date(editingService.date) : null}
+                        onChange={(newDate) => { if (!newDate || Number.isNaN(new Date(newDate).getTime())) return; setEditingService({ ...editingService, date: format(new Date(newDate), 'yyyy-MM-dd') }); }}
+                        slotProps={{ textField: { fullWidth: true, margin: 'dense' } }}
                     />
                     <TextField
-                        label="Usta Adı"
+                        label="Mechanic Name"
                         value={editingService.mechanicName}
                         onChange={(e) => setEditingService({ ...editingService, mechanicName: e.target.value })}
                         fullWidth
                         margin="dense"
                     />
                     <TextField
-                        label="Yapılan İşlem"
+                        label="Work Done"
                         value={editingService.workDone}
                         onChange={(e) => setEditingService({ ...editingService, workDone: e.target.value })}
                         fullWidth
@@ -491,31 +704,40 @@ const VehicleTracking = () => {
                         rows={3}
                     />
                     <TextField
-                        label="Ücret"
+                        label="Cost"
                         value={editingService.cost}
                         onChange={(e) => setEditingService({ ...editingService, cost: e.target.value })}
                         fullWidth
                         margin="dense"
                         type="number"
+                        inputProps={{ min: 0 }}
                     />
                     <DatePicker
-                        label="Sonraki Servis Tarihi"
-                        value={new Date(editingService.nextServiceDate)}
-                        onChange={(newDate) => setEditingService({ ...editingService, nextServiceDate: format(newDate, 'yyyy-MM-dd') })}
-                        renderInput={(params) => <TextField {...params} fullWidth margin="dense" />}
+                        label="Next Service Date"
+                        value={editingService.nextServiceDate ? new Date(editingService.nextServiceDate) : null}
+                        onChange={(newDate) => { if (!newDate || Number.isNaN(new Date(newDate).getTime())) return; setEditingService({ ...editingService, nextServiceDate: format(new Date(newDate), 'yyyy-MM-dd') }); }}
+                        slotProps={{ textField: { fullWidth: true, margin: 'dense' } }}
                     />
                 </DialogContent>
                 <DialogActions>
-                    <Button onClick={() => handleEditService(editingService, editingService.index)} color="primary">
-                        Değişiklikleri Kaydet
+                    <Button onClick={() => handleEditService(editingService, editingService.originalIndex ?? editingService.index)} color="primary" variant="contained" disabled={isUpdating} startIcon={isUpdating ? <CircularProgress size={20} color="inherit" /> : null}>
+                        {isUpdating ? 'Saving...' : 'Save Changes'}
                     </Button>
-                    <Button onClick={() => setEditingService(null)} color="secondary">
-                        İptal
+                    <Button onClick={() => setEditingService(null)} color="secondary" disabled={isUpdating}>
+                        Cancel
                     </Button>
                 </DialogActions>
             </Dialog>
         )}
 
+                    <SuccessModal
+                        open={successModal.open}
+                        onClose={() => setSuccessModal({ ...successModal, open: false })}
+                        title={successModal.title}
+                        message={successModal.message}
+                        details={successModal.details}
+                        actionLabel="Done"
+                    />
                     <Snackbar
                         open={snackbar.open}
                         autoHideDuration={6000}
