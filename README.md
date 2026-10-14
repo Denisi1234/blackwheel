@@ -73,8 +73,8 @@ Black Wheel (Tire Management System) is a comprehensive React application specif
 
 To run this project locally, follow these steps:
 
-1. Clone this repo: `git clone https://github.com/yusufaykin/TireManagementSystem.git`
-2. Navigate to the project folder: `cd TireManagementSystem`
+1. Clone this repo: `git clone https://github.com/Denisi1234/blackwheel.git`
+2. Navigate to the project folder: `cd blackwheel`
 3. Install the necessary dependencies: `npm install`
 4. Start the project: `npm run start`
 
@@ -82,7 +82,7 @@ To run this project locally, follow these steps:
 
 We welcome contributions of any kind! If you'd like to contribute to the project, please follow these steps:
 
-1. Fork this repo: `https://github.com/yusufaykin/TireManagementSystem/fork`
+1. Fork this repo: `https://github.com/Denisi1234/blackwheel/fork`
 2. Create a new branch: `git checkout -b new-feature`
 3. Make your changes and commit them: `git commit -am 'Add new feature'`
 4. Push your branch: `git push origin new-feature`
