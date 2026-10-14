@@ -195,6 +195,7 @@ const App = () => {
   const [shop, setShop] = useState(null);
   const [shopError, setShopError] = useState("");
   const [shopPickerOpen, setShopPickerOpen] = useState(false);
+  const [dataNonce, setDataNonce] = useState(0);
   const loadedRef = useRef(false);
 
   // ---- Multi-tenant shop session --------------------------------------
@@ -261,7 +262,19 @@ const App = () => {
     try {
       const membership = await p;
       setShopError("");
-      return enterMemberships(baseUser, [membership]);
+      const entered = enterMemberships(baseUser, [membership]);
+      // Signup takeover: the fresh account automatically claims any
+      // browser-local rows into its new shop — no manual upload step.
+      // (Invited users arrive with memberships and skip provisioning.)
+      try {
+        const res = await syncLocalToCloud();
+        if (res && res.ok && (res.totalUploaded > 0 || res.totalFailed > 0)) {
+          setDataNonce((n) => n + 1);
+        }
+      } catch (e) {
+        console.warn("Signup data takeover failed, manual upload remains:", e);
+      }
+      return entered;
     } catch (e) {
       const msg = (e && e.message) || "Could not set up your shop.";
       console.warn("Auto shop provisioning failed:", msg);
@@ -632,7 +645,7 @@ const App = () => {
     }
     loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shop?.id]);
+  }, [shop?.id, dataNonce]);
 
   const handleSyncUpload = async () => {
     if (syncing) return;
