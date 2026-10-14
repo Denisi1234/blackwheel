@@ -1,4 +1,4 @@
--- TireManagementSystem full schema for Supabase (Postgres)
+-- Blackwheel full schema for Supabase (Postgres)
 -- Run in Supabase Dashboard > SQL Editor. Idempotent with IF NOT EXISTS where possible.
 
 -- Enable UUID generation

@@ -95,8 +95,8 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## Contact
 
-If you have any questions or suggestions, please feel free to contact me via email: [aykinyusuf1@gmail.com]
+If you have any questions or suggestions, please open an issue: [Denisi1234/blackwheel issues](https://github.com/Denisi1234/blackwheel/issues)
 
 ---
 
-Black Wheel is developed by Yusuf Aykın. All rights reserved.
+Black Wheel is maintained by Denisi1234. All rights reserved.
