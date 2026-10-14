@@ -37,11 +37,9 @@ import {
   deleteRow,
   newId,
   isSupabaseConfigured,
-  cacheKeyFor,
 } from '../lib/store';
 import { TEAM_ROLES, INVITE_ROLES } from '../lib/team';
-
-const FALLBACK_KEY = 'teamProfiles';
+import { getAppLang } from './i18n';
 
 const STR = {
   en: {
@@ -114,14 +112,6 @@ const STR = {
   },
 };
 
-function teamLang() {
-  try {
-    return localStorage.getItem('app_lang') === 'sw' ? 'sw' : 'en';
-  } catch (e) {
-    return 'en';
-  }
-}
-
 function roleLabel(t, role) {
   if (role === 'Admin') return t.roleAdmin;
   if (role === 'Technician') return t.roleTechnician;
@@ -131,7 +121,7 @@ function roleLabel(t, role) {
 
 function TeamManagement({ shop = null, currentUser = null }) {
   const shopId = shop?.id || '';
-  // Offline single-device mode has no roles backend — the local user is admin.
+  // Without cloud config there is no roles backend — treat as admin.
   const isAdmin =
     !isSupabaseConfigured() || (shop?.role || currentUser?.role) === 'Admin';
   const [profiles, setProfiles] = useState([]);
@@ -142,29 +132,8 @@ function TeamManagement({ shop = null, currentUser = null }) {
   const [form, setForm] = useState({ name: '', email: '', role: 'Sales' });
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(10);
-  const [langTick, setLangTick] = useState(0);
-  useEffect(() => {
-    const sync = () => setLangTick((x) => x + 1);
-    window.addEventListener('app_lang_change', sync);
-    window.addEventListener('storage', sync);
-    return () => {
-      window.removeEventListener('app_lang_change', sync);
-      window.removeEventListener('storage', sync);
-    };
-  }, []);
   const loadedRef = useRef(false);
-  const t = STR[teamLang()] || STR.en;
-  void langTick;
-
-  const safeParse = () => {
-    try {
-      const raw = localStorage.getItem(cacheKeyFor(FALLBACK_KEY));
-      const parsed = raw ? JSON.parse(raw) : [];
-      return Array.isArray(parsed) ? parsed : [];
-    } catch (e) {
-      return [];
-    }
-  };
+  const t = STR[getAppLang()] || STR.en;
 
   useEffect(() => {
     const loadAll = async () => {
@@ -178,10 +147,7 @@ function TeamManagement({ shop = null, currentUser = null }) {
               : remote || []
           );
         } else {
-          const local = safeParse();
-          setProfiles(
-            shopId ? local.filter((p) => String(p?.shopId || '') === String(shopId) || !p?.shopId) : local
-          );
+          setProfiles([]);
         }
       } catch (e) {
         setProfiles([]);
@@ -193,15 +159,6 @@ function TeamManagement({ shop = null, currentUser = null }) {
     loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shopId]);
-
-  useEffect(() => {
-    if (!loadedRef.current) return;
-    try {
-      localStorage.setItem(cacheKeyFor(FALLBACK_KEY), JSON.stringify(profiles));
-    } catch (e) {
-      // ignore
-    }
-  }, [profiles]);
 
   const rows = useMemo(
     () => [...(profiles || [])].sort((a, b) => String(a?.email || '').localeCompare(String(b?.email || ''))),

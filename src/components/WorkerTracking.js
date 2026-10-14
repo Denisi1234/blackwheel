@@ -53,7 +53,7 @@ import { jsPDF } from "jspdf";
 import "jspdf-autotable";
 import SuccessModal from "./SuccessModal";
 import { downloadCsv, datedName, paintHeader, paintFooter, moneyTable, fmtDate } from "../lib/documents";
-import { loadTable, insertRow, updateRow, deleteRow, newId, isUuid, isSupabaseConfigured, cacheGet, cacheSet } from "../lib/store";
+import { loadTable, insertRow, updateRow, deleteRow, newId, isUuid, isSupabaseConfigured } from "../lib/store";
 import { getWorkerPermissions } from "../lib/team";
 
 const TASK_TYPES = ["Removal", "Fitting", "Repair", "Maintenance", "Inspection"];
@@ -151,7 +151,7 @@ const WorkerTracking = ({ user = null, shop = null }) => {
 
   const showSnackbar = (message, severity = "success") => setSnackbar({ open: true, message, severity });
 
-  // ---- Load: Supabase-first, localStorage fallback ----
+  // ---- Load: pure cloud ----
   useEffect(() => {
     const loadAll = async () => {
       try {
@@ -160,27 +160,8 @@ const WorkerTracking = ({ user = null, shop = null }) => {
           setWorkers(Array.isArray(remoteWorkers) ? remoteWorkers : []);
           setTasks(Array.isArray(remoteTasks) ? remoteTasks : []);
         } else {
-          let w = [];
-          let t = [];
-          try {
-            w = cacheGet("workers", []);
-            t = cacheGet("tasks", []);
-          } catch (e) {
-            // ignore corrupt storage
-          }
-          const normW = (Array.isArray(w) ? w : []).map((x) => ({ id: x.id ?? newId(), name: x.name || "", position: x.position || "", contact: x.contact || "" }));
-          const normT = (Array.isArray(t) ? t : []).map((x) => ({
-            id: x.id ?? newId(),
-            workerId: x.workerId ?? x.worker_id ?? "",
-            task: x.task || "",
-            date: x.date || "",
-            time: x.time || "",
-            status: x.status || "In Progress",
-            details: x.details || "",
-            completionTime: x.completionTime || x.completion_time || "",
-          }));
-          setWorkers(normW);
-          setTasks(normT);
+          setWorkers([]);
+          setTasks([]);
         }
       } catch (e) {
         setWorkers([]);
@@ -191,16 +172,6 @@ const WorkerTracking = ({ user = null, shop = null }) => {
     };
     loadAll();
   }, []);
-
-  useEffect(() => {
-    if (!loadedRef.current) return;
-    try {
-      cacheSet("workers", workers);
-      cacheSet("tasks", tasks);
-    } catch (e) {
-      // storage full / unavailable — app keeps working in-memory
-    }
-  }, [workers, tasks]);
 
   const workerById = (id) => (workers || []).find((w) => String(w?.id) === String(id));
 

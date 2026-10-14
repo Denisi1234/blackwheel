@@ -1,6 +1,6 @@
-// Supabase-backed store with localStorage fallback.
-// If REACT_APP_SUPABASE_URL / ANON_KEY are configured, reads/writes go to Supabase.
-// Otherwise everything falls back to localStorage so the app works offline / in dev.
+// Pure-cloud Supabase store. No browser storage anywhere: every read comes
+// from Postgres, every write goes to Postgres. The UI stays instant because
+// writes update in-memory state first and sync to the cloud fire-and-forget.
 import { supabase } from "./supabaseClient";
 
 export function isSupabaseConfigured() {
@@ -34,9 +34,7 @@ export function isUuid(value) {
   );
 }
 
-// Map localStorage keys -> supabase tables. Only core tables are synced;
-// module-local keys (vehicles, workers, appointments, hotelCustomers...) stay local
-// until their components are migrated.
+// Module keys -> supabase tables. Tables not listed here are UI-only.
 const TABLE_MAP = {
   tires: "tires",
   sales: "sales",
@@ -76,79 +74,17 @@ const TENANT_TABLES = new Set([
   "appointments",
 ]);
 
-const SHOP_KEY = "blackwheel_shop_id";
+// Active shop id lives in memory only (never in browser storage): a refresh
+// re-resolves it from the user's memberships, so accounts can never leak
+// across logins on shared devices.
+let MEM_SHOP_ID = "";
 
 export function getCurrentShopId() {
-  try {
-    return localStorage.getItem(SHOP_KEY) || "";
-  } catch (e) {
-    return "";
-  }
+  return MEM_SHOP_ID || "";
 }
 
 export function setCurrentShopId(id) {
-  try {
-    if (id) localStorage.setItem(SHOP_KEY, id);
-    else localStorage.removeItem(SHOP_KEY);
-  } catch (e) {
-    // ignore
-  }
-}
-
-// ---------- Shop-scoped browser cache ----------
-// Business-data caches must never leak across shops/accounts sharing one
-// browser: keys are namespaced by the active shop id while cloud mode is on.
-// Offline / no-shop keeps the legacy plain key. A legacy global cache is
-// adopted once into the current shop scope (single-shop browsers keep their
-// unsynced rows; multi-shop browsers should sync before switching).
-const LEGACY_ADOPTED = {};
-
-export function cacheKeyFor(key) {
-  try {
-    if (!isSupabaseConfigured()) return key;
-    const sid = getCurrentShopId();
-    return sid ? `${key}::${sid}` : key;
-  } catch (e) {
-    return key;
-  }
-}
-
-function adoptLegacyCache(key, scoped) {
-  if (scoped === key || LEGACY_ADOPTED[scoped]) return;
-  LEGACY_ADOPTED[scoped] = true;
-  try {
-    if (localStorage.getItem(scoped) !== null) return;
-    const raw = localStorage.getItem(key);
-    if (raw === null) return;
-    localStorage.setItem(scoped, raw);
-    localStorage.removeItem(key);
-  } catch (e) {
-    // ignore
-  }
-}
-
-export function cacheGet(key, fallback) {
-  const scoped = cacheKeyFor(key);
-  adoptLegacyCache(key, scoped);
-  try {
-    const raw = localStorage.getItem(scoped);
-    if (raw === null || raw === undefined) return fallback;
-    const parsed = JSON.parse(raw);
-    return parsed === null || parsed === undefined ? fallback : parsed;
-  } catch (e) {
-    return fallback;
-  }
-}
-
-export function cacheSet(key, value) {
-  const scoped = cacheKeyFor(key);
-  adoptLegacyCache(key, scoped);
-  try {
-    localStorage.setItem(scoped, JSON.stringify(value));
-    return true;
-  } catch (e) {
-    return false;
-  }
+  MEM_SHOP_ID = id || "";
 }
 
 // App invoice statuses <-> Postgres check constraint values.
@@ -540,15 +476,13 @@ function mapRowFromSupabase(table, row) {
 
 export async function loadTable(key) {
   const table = TABLE_MAP[key];
-  if (!table || !isSupabaseConfigured()) return null; // null = use localStorage
+  if (!table || !isSupabaseConfigured()) return null; // null = cloud unavailable
   try {
     let query = supabase.from(table).select("*");
     // Tenant isolation: only the current shop's rows (profiles/shops rely on
-    // RLS visibility instead — invites and shop switching need cross-scope).
+    // RLS visibility instead — invites need cross-scope).
     if (TENANT_TABLES.has(table)) {
       const shopId = getCurrentShopId();
-      // No shop selected yet: return null so callers keep localStorage data
-      // instead of wiping it with a misleading empty array (data-loss fix).
       if (!shopId) return null;
       query = query.eq("shop_id", shopId);
     }
@@ -556,12 +490,12 @@ export async function loadTable(key) {
     // loadTablePage() for larger datasets instead of raising this.
     const { data, error } = await query.order("created_at", { ascending: false }).limit(500);
     if (error) {
-      console.warn(`Supabase load ${table} failed, falling back to local:`, error.message);
+      console.warn(`Supabase load ${table} failed:`, error.message);
       return null;
     }
     return (data || []).map((r) => mapRowFromSupabase(table, r));
   } catch (e) {
-    console.warn(`Supabase load ${table} exception, falling back to local:`, e);
+    console.warn(`Supabase load ${table} exception:`, e);
     return null;
   }
 }
@@ -775,244 +709,3 @@ export async function uploadTirePhoto(file) {
   }
 }
 
-// ---------- Local -> cloud backfill ----------
-// Rescue path for rows that only ever reached browser localStorage (created
-// before a shop was selected, or while cloud writes failed). Without this,
-// selecting a shop loads an empty cloud and the empty array overwrites the
-// local cache — data looks "lost" on every other device.
-
-// Parents before children so same-run uuid FK references resolve.
-export const SYNC_KEYS_ORDER = [
-  "tires",
-  "hotelCustomers",
-  "vehicles",
-  "accounts",
-  "workers",
-  "sales",
-  "inventory",
-  "deliveries",
-  "hotelTires",
-  "services",
-  "tasks",
-  "transactions",
-  "invoices",
-  "appointments",
-];
-
-// Child localStorage key -> { dbFkColumn: parentKey }. Columns use DB names;
-// the sanitizer strips both snake_case and camelCase variants before insert.
-const SYNC_FK_PARENT = {
-  sales: { tire_id: "tires" },
-  inventory: { tire_id: "tires" },
-  deliveries: { tire_id: "tires" },
-  hotelTires: { customer_id: "hotelCustomers" },
-  services: { vehicle_id: "vehicles" },
-  tasks: { worker_id: "workers" },
-  transactions: { account_id: "accounts" },
-  invoices: { customer_id: "accounts" },
-};
-
-// FK columns that are NOT NULL in Postgres: rows pointing at unknown parents
-// must be skipped (stripping would violate the constraint).
-const SYNC_REQUIRED_FKS = {
-  services: ["vehicle_id"],
-  transactions: ["account_id"],
-};
-
-const SYNC_FK_CAMEL = {
-  tire_id: "tireId",
-  customer_id: "customerId",
-  vehicle_id: "vehicleId",
-  worker_id: "workerId",
-  account_id: "accountId",
-};
-
-// Rows whose id is not yet in the cloud set are pending upload.
-// Rows without any id are always pending (the DB generates one).
-export function selectPendingUploads(localRows, remoteIds) {
-  const seen = remoteIds instanceof Set ? remoteIds : new Set();
-  return (Array.isArray(localRows) ? localRows : []).filter((r) => {
-    if (!r || typeof r !== "object") return false;
-    if (r.id === undefined || r.id === null || r.id === "") return true;
-    return !seen.has(String(r.id));
-  });
-}
-
-// Strip FK references the cloud does not know (dangling or legacy ids) so
-// the row still uploads instead of failing on uuid syntax / FK violations.
-// knownIdsByKey maps parent key -> Set of cloud-known String ids.
-// Returns { row, skip } — skip is true for NOT NULL FKs with unknown parents.
-export function sanitizeSyncRow(key, row, knownIdsByKey = {}) {
-  const out = { ...(row || {}) };
-  const fks = SYNC_FK_PARENT[key] || {};
-  const required = SYNC_REQUIRED_FKS[key] || [];
-  for (const [col, parentKey] of Object.entries(fks)) {
-    const cKey = SYNC_FK_CAMEL[col];
-    const hasDb = out[col] !== undefined && out[col] !== null && out[col] !== "";
-    const hasCamel = cKey && out[cKey] !== undefined && out[cKey] !== null && out[cKey] !== "";
-    if (!hasDb && !hasCamel) continue;
-    const raw = hasDb ? out[col] : out[cKey];
-    const known = knownIdsByKey[parentKey];
-    const ok = isUuid(raw) && (!known || known.has(String(raw)));
-    if (!ok) {
-      if (required.includes(col)) return { row: out, skip: true };
-      delete out[col];
-      if (cKey) delete out[cKey];
-    }
-  }
-  return { row: out, skip: false };
-}
-
-async function fetchRemoteIds(table, shopId) {
-  try {
-    const { data, error } = await supabase
-      .from(table)
-      .select("id")
-      .eq("shop_id", shopId)
-      .limit(5000);
-    if (error) {
-      console.warn(`Supabase sync ${table} id fetch failed:`, error.message);
-      return null;
-    }
-    return new Set((data || []).map((r) => String(r.id)));
-  } catch (e) {
-    console.warn(`Supabase sync ${table} id fetch exception:`, e);
-    return null;
-  }
-}
-
-function readLocalRows(key) {
-  const parsed = cacheGet(key, []);
-  return Array.isArray(parsed) ? parsed : [];
-}
-
-// Upload every local-only row to Supabase under the current shop.
-// Idempotent: rows already in the cloud (by id, plus SKU for tires) are
-// skipped, so re-running is always safe. Returns a per-table summary.
-export async function syncLocalToCloud(onProgress) {
-  if (!isSupabaseConfigured()) {
-    return { ok: false, error: "Supabase is not configured." };
-  }
-  const shopId = getCurrentShopId();
-  if (!shopId) {
-    return { ok: false, error: "Select a shop first." };
-  }
-  const tables = {};
-  const known = {};
-  let totalUploaded = 0;
-  let totalFailed = 0;
-  const report = (key) => {
-    if (typeof onProgress === "function") {
-      try {
-        onProgress(key, tables[key]);
-      } catch (e) {
-        // progress callbacks must never break the sync
-      }
-    }
-  };
-  for (const key of SYNC_KEYS_ORDER) {
-    const table = TABLE_MAP[key];
-    if (!table) continue;
-    const local = readLocalRows(key);
-    tables[key] = { total: local.length, uploaded: 0, failed: 0, skipped: 0 };
-    if (local.length === 0) {
-      known[key] = new Set();
-      report(key);
-      continue;
-    }
-    const remoteIds = await fetchRemoteIds(table, shopId);
-    if (!remoteIds) {
-      // Unknown cloud state: refuse to guess, mark all as failed (not lost).
-      tables[key].failed = local.length;
-      totalFailed += local.length;
-      known[key] = new Set();
-      report(key);
-      continue;
-    }
-    // Inventory is a unique-per-tire mirror: upsert instead of inserting
-    // (blind inserts would violate the unique tire_id constraint).
-    if (key === "inventory") {
-      for (const row of local) {
-        const tid = row && (row.tireId || row.tire_id);
-        if (!isUuid(tid) || !(known.tires && known.tires.has(String(tid)))) {
-          tables[key].skipped += 1;
-          continue;
-        }
-        const qty = Number(row.quantity !== undefined ? row.quantity : row.stock);
-        const res = await upsertInventoryRow(String(tid), Number.isNaN(qty) ? 0 : qty);
-        if (res) tables[key].uploaded += 1;
-        else tables[key].failed += 1;
-      }
-      known[key] = new Set(remoteIds);
-      tables[key].skipped = local.length - tables[key].uploaded - tables[key].failed;
-      totalUploaded += tables[key].uploaded;
-      totalFailed += tables[key].failed;
-      report(key);
-      continue;
-    }
-    let skus = null;
-    if (key === "tires") {
-      skus = new Set();
-      try {
-        const { data, error } = await supabase
-          .from("tires")
-          .select("sku")
-          .eq("shop_id", shopId)
-          .limit(5000);
-        if (!error) {
-          (data || []).forEach((r) => {
-            const s = String(r && r.sku ? r.sku : "").trim().toLowerCase();
-            if (s) skus.add(s);
-          });
-        }
-      } catch (e) {
-        // SKU dedupe is best-effort; id dedupe still protects below.
-      }
-    }
-    for (const row of selectPendingUploads(local, remoteIds)) {
-      if (key === "tires" && skus && row.sku) {
-        const s = String(row.sku).trim().toLowerCase();
-        if (s && skus.has(s)) {
-          tables[key].skipped += 1;
-          continue;
-        }
-      }
-      const { row: sanitized, skip } = sanitizeSyncRow(key, row, known);
-      if (skip) {
-        tables[key].skipped += 1;
-        continue;
-      }
-      const clean = { ...sanitized };
-      // Embedded base64 photos would bloat the cloud row and already get
-      // dropped by the local quota fallback — keep URL photos only.
-      if (key === "tires" && Array.isArray(clean.images)) {
-        const kept = clean.images.filter(
-          (img) => typeof img === "string" && !img.startsWith("data:")
-        );
-        if (kept.length !== clean.images.length) {
-          clean.images = kept;
-          tables[key].photosDropped = (tables[key].photosDropped || 0) + 1;
-        }
-      }
-      const saved = await insertRow(key, clean);
-      if (saved) {
-        tables[key].uploaded += 1;
-        const rid = saved.id || clean.id || row.id;
-        if (rid) remoteIds.add(String(rid));
-        if (key === "tires" && skus && clean.sku) {
-          const s = String(clean.sku).trim().toLowerCase();
-          if (s) skus.add(s);
-        }
-      } else {
-        tables[key].failed += 1;
-      }
-    }
-    tables[key].skipped += local.length - tables[key].uploaded - tables[key].failed - tables[key].skipped;
-    totalUploaded += tables[key].uploaded;
-    totalFailed += tables[key].failed;
-    known[key] = remoteIds;
-    report(key);
-  }
-  const totalSkipped = Object.values(tables).reduce((n, t) => n + (t.skipped || 0), 0);
-  return { ok: true, shopId, tables, totalUploaded, totalSkipped, totalFailed };
-}

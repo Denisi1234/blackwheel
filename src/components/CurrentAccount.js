@@ -90,8 +90,6 @@ import {
   newId,
   isUuid,
   isSupabaseConfigured,
-  cacheGet,
-  cacheSet,
 } from "../lib/store";
 import { formatTireLabel } from "../lib/tireIdentity";
 import {
@@ -316,13 +314,7 @@ const CurrentAccount = ({ tires = [], sales = [], deliveries = [], user = null, 
   });
   const [currencies] = useState(["TZS", "USD", "EUR", "GBP"]);
 
-  const safeParse = (key, fallback) => cacheGet(key, fallback);
-
-  const safeSave = (key, value) => {
-    cacheSet(key, value);
-  };
-
-  // Supabase-first load; localStorage fallback keeps the module working offline.
+  // Pure-cloud load; empty when the cloud is unreachable.
   useEffect(() => {
     const loadAll = async () => {
       setLoading(true);
@@ -333,14 +325,9 @@ const CurrentAccount = ({ tires = [], sales = [], deliveries = [], user = null, 
             loadTable("transactions"),
             loadTable("invoices"),
           ]);
-        let nextAccounts =
-          remoteAccounts !== null ? remoteAccounts : safeParse("accounts", []);
-        let nextTransactions =
-          remoteTransactions !== null
-            ? remoteTransactions
-            : safeParse("accountTransactions", []);
-        const nextInvoices =
-          remoteInvoices !== null ? remoteInvoices : safeParse("invoices", []);
+        let nextAccounts = remoteAccounts || [];
+        let nextTransactions = remoteTransactions || [];
+        const nextInvoices = remoteInvoices || [];
         // One-time migration: legacy rows nested transactions inside accounts.
         // Flatten them so old browsers keep their history in the new model.
         const flattened = [];
@@ -385,22 +372,6 @@ const CurrentAccount = ({ tires = [], sales = [], deliveries = [], user = null, 
     loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Local mirror (offline fallback) — Supabase writes happen per-action below.
-  useEffect(() => {
-    if (!loadedRef.current) return;
-    safeSave("accounts", accounts);
-  }, [accounts]);
-
-  useEffect(() => {
-    if (!loadedRef.current) return;
-    safeSave("accountTransactions", transactions);
-  }, [transactions]);
-
-  useEffect(() => {
-    if (!loadedRef.current) return;
-    safeSave("invoices", invoices);
-  }, [invoices]);
 
   const transactionsOf = (accountId) =>
     (transactions || []).filter(

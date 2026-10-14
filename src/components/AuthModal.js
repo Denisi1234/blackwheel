@@ -11,7 +11,6 @@ import {
   IconButton,
   Tabs,
   Tab,
-  Divider,
   FormControlLabel,
   Checkbox,
   Stack,
@@ -26,7 +25,7 @@ import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import { supabase } from '../lib/supabaseClient';
 import { isSupabaseConfigured } from '../lib/store';
 import { resolveShopMemberships } from '../lib/team';
-import i18n from './i18n';
+import { getAppLang, setAppLang } from './i18n';
 
 const translations = {
   en: {
@@ -49,7 +48,7 @@ const translations = {
     forgotPassword: 'Forgot password?',
     signInButton: 'Sign In',
     registerButton: 'Create Account',
-    offlineNotice: 'Offline mode — sign in with any email; the profile is created from what you type and stays in this browser.',
+    cloudRequired: 'Cloud connection required — check your setup and retry.',
     adminRole: 'Administrator',
     technicianRole: 'Technician',
     salesRole: 'Sales Lead',
@@ -82,7 +81,7 @@ const translations = {
     forgotPassword: 'Umesahau nenosiri?',
     signInButton: 'Ingia',
     registerButton: 'Fungua Akaunti',
-    offlineNotice: 'Modo wa nje ya mtandao — ingia na barua pepe yoyote; wasifu huundwa kwa ulichoandika na hubaki kwenye kivinjari hiki.',
+    cloudRequired: 'Muunganisho wa cloud unahitajika — angalia usanidi na ujaribu tena.',
     adminRole: 'Msimamizi',
     technicianRole: 'Fundi',
     salesRole: 'Muuza',
@@ -98,13 +97,7 @@ const translations = {
 };
 
 function AuthModal({ onLoginSuccess, darkMode = false, onToggleDarkMode }) {
-  const [lang, setLang] = useState(() => {
-    try {
-      return localStorage.getItem('app_lang') === 'sw' ? 'sw' : 'en';
-    } catch (e) {
-      return 'en';
-    }
-  });
+  const [lang, setLang] = useState(() => getAppLang());
   const t = translations[lang] || translations.en;
 
   const [viewMode, setViewMode] = useState(0);
@@ -126,11 +119,7 @@ function AuthModal({ onLoginSuccess, darkMode = false, onToggleDarkMode }) {
   const toggleLanguage = () => {
     const next = lang === 'en' ? 'sw' : 'en';
     setLang(next);
-    try {
-      localStorage.setItem('app_lang', next);
-      if (i18n && i18n.changeLanguage) i18n.changeLanguage(next);
-      window.dispatchEvent(new Event('app_lang_change'));
-    } catch (e) { /* ignore */ }
+    setAppLang(next);
   };
 
   const passwordHint = useMemo(() => {
@@ -190,13 +179,7 @@ function AuthModal({ onLoginSuccess, darkMode = false, onToggleDarkMode }) {
           );
         }
       } else {
-        onLoginSuccess({
-          id: `usr_${Date.now()}`,
-          email: email.trim(),
-          name: email.trim().split('@')[0],
-          role: 'Staff',
-          avatar: '',
-        }, null);
+        setErrorMsg(t.cloudRequired);
       }
     } catch (err) {
       setErrorMsg(err.message || 'Failed to sign in.');
@@ -249,13 +232,7 @@ function AuthModal({ onLoginSuccess, darkMode = false, onToggleDarkMode }) {
           setViewMode(0);
         }
       } else {
-        onLoginSuccess({
-          id: `usr_${Date.now()}`,
-          email: email.trim(),
-          name: fullName.trim() || email.split('@')[0],
-          role: 'Staff',
-          avatar: '',
-        }, null);
+        setErrorMsg(t.cloudRequired);
       }
     } catch (err) {
       setErrorMsg(err.message || 'Failed to register.');
@@ -281,7 +258,7 @@ function AuthModal({ onLoginSuccess, darkMode = false, onToggleDarkMode }) {
         if (error) throw error;
         setSuccessMsg(t.resetSuccessMsg);
       } else {
-        setSuccessMsg(t.resetSuccessMsg + ' (offline mode)');
+        setErrorMsg(t.cloudRequired);
       }
     } catch (err) {
       setErrorMsg(err.message || 'Unable to send reset email.');
@@ -444,14 +421,6 @@ function AuthModal({ onLoginSuccess, darkMode = false, onToggleDarkMode }) {
           </Box>
         )}
 
-        {!supabaseReady && (
-          <>
-            <Divider sx={{ my: 2 }} />
-            <Typography variant="caption" color="text.secondary" display="block" textAlign="center">
-              {t.offlineNotice}
-            </Typography>
-          </>
-        )}
       </Container>
       <Box textAlign="center" sx={{ pb: 3 }}>
         <Button size="small" variant="text" onClick={toggleLanguage} sx={{ textTransform: 'none', fontWeight: 600 }}>

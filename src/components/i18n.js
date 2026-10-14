@@ -39,6 +39,24 @@ const sw = {
   viewSalesHistory: 'Angalia Historia ya Mauzo',
 };
 
+let APP_LANG = 'en';
+export function getAppLang() {
+  return APP_LANG;
+}
+export function setAppLang(next) {
+  APP_LANG = next === 'sw' ? 'sw' : 'en';
+  try {
+    if (i18n && i18n.changeLanguage) i18n.changeLanguage(APP_LANG);
+  } catch (e) {
+    // ignore
+  }
+  try {
+    window.dispatchEvent(new Event('app_lang_change'));
+  } catch (e) {
+    // ignore
+  }
+}
+
 i18n
   .use(initReactI18next)
   .init({
@@ -46,13 +64,7 @@ i18n
       en: { translation: en },
       sw: { translation: sw },
     },
-    lng: (() => {
-      try {
-        return localStorage.getItem('app_lang') === 'sw' ? 'sw' : 'en';
-      } catch (e) {
-        return 'en';
-      }
-    })(),
+    lng: 'en',
     fallbackLng: 'en',
     interpolation: {
       escapeValue: false

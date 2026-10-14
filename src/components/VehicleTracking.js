@@ -23,7 +23,6 @@ import {
   deleteRow,
   newId,
   isUuid,
-  cacheKeyFor,
 } from '../lib/store';
 import {
   paintHeader,
@@ -67,18 +66,7 @@ const VehicleTracking = () => {
     const [upcomingServices, setUpcomingServices] = useState([]);
     const loadedRef = useRef(false);
 
-    const withIds = (list) =>
-      (Array.isArray(list) ? list : []).map((v) => {
-        const vehicle = { ...v, id: v.id ?? newId(), services: v.services || [] };
-        vehicle.services = vehicle.services.map((s) =>
-          s && typeof s === "object"
-            ? { ...s, id: s.id ?? newId(), vehicleId: vehicle.id }
-            : s
-        );
-        return vehicle;
-      });
-
-    // Supabase-first (vehicles + services joined); localStorage fallback.
+    // Pure cloud (vehicles + services joined).
     useEffect(() => {
         const loadAll = async () => {
             try {
@@ -102,16 +90,9 @@ const VehicleTracking = () => {
                     updateStatistics(joined);
                     updateUpcomingServices(joined);
                 } else {
-                    const raw = localStorage.getItem(cacheKeyFor('vehicles'));
-                    const savedVehicles = raw ? JSON.parse(raw) : [];
-                    const normalized = withIds(
-                        Array.isArray(savedVehicles)
-                          ? savedVehicles.map((v) => ({ ...v, services: v.services || [] }))
-                          : []
-                    );
-                    setVehicles(normalized);
-                    updateStatistics(normalized);
-                    updateUpcomingServices(normalized);
+                    setVehicles([]);
+                    updateStatistics([]);
+                    updateUpcomingServices([]);
                 }
             } catch (e) {
                 setVehicles([]);
@@ -127,11 +108,6 @@ const VehicleTracking = () => {
 
     useEffect(() => {
         if (!loadedRef.current) return;
-        try {
-            localStorage.setItem(cacheKeyFor('vehicles'), JSON.stringify(vehicles));
-        } catch (e) {
-            // storage unavailable
-        }
         updateStatistics(vehicles);
         updateUpcomingServices(vehicles);
     }, [vehicles]);

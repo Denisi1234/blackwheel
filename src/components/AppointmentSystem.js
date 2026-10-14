@@ -67,8 +67,6 @@ import {
   updateRow,
   deleteRow,
   newId,
-  cacheGet,
-  cacheSet,
 } from "../lib/store";
 
 const localizer = momentLocalizer(moment);
@@ -122,34 +120,20 @@ const AppointmentSystem = () => {
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const loadedRef = useRef(false);
 
-  // Supabase-first; localStorage fallback keeps bookings working offline.
+  // Pure cloud: every read comes from Postgres.
   useEffect(() => {
     const loadAll = async () => {
       try {
         const remote = await loadTable("appointments");
-        if (remote !== null) {
-          setAppointments(remote);
-        } else {
-          const parsed = cacheGet("appointments", []);
-          if (Array.isArray(parsed)) setAppointments(parsed);
-        }
+        setAppointments(Array.isArray(remote) ? remote : []);
       } catch (e) {
-        // ignore corrupt storage
+        setAppointments([]);
       } finally {
         loadedRef.current = true;
       }
     };
     loadAll();
   }, []);
-
-  useEffect(() => {
-    if (!loadedRef.current) return;
-    try {
-      cacheSet("appointments", appointments);
-    } catch (e) {
-      // storage unavailable
-    }
-  }, [appointments]);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;

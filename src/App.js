@@ -48,12 +48,11 @@ import PersonIcon from "@mui/icons-material/Person";
 import InventoryIcon from "@mui/icons-material/Inventory";
 import GroupIcon from "@mui/icons-material/Group";
 import { supabase } from "./lib/supabaseClient";
-import CalendarTodayIcon from "@mui/icons-material/CalendarToday";import { getLowStockThreshold, getCurrency } from "./lib/settings";
+import CalendarTodayIcon from "@mui/icons-material/CalendarToday";
+import { getLowStockThreshold, getCurrency, loadShopSettings, resetSettingsMemory } from "./lib/settings";
 import {
   loadTable,
   insertRow,
-  syncLocalToCloud,
-  cacheKeyFor,
   updateRow,
   deleteRow,
   deleteRowsByTireId,
@@ -160,40 +159,22 @@ const StyledBadge = styled(Badge)(({ theme }) => ({
 const App = () => {
   const [tires, setTires] = useState([]);
   const [sales, setSales] = useState([]);
-  const [hotelTires, setHotelTires] = useState([]);
   const [selectedComponent, setSelectedComponent] = useState("Dashboard");
   const [open, setOpen] = useState(true);
   const [darkMode, setDarkMode] = useState(false);
   const [anchorEl, setAnchorEl] = useState(null);
-  const [user, setUser] = useState(() => {
-    try {
-      const stored = localStorage.getItem("blackwheel_auth_user");
-      if (stored) return JSON.parse(stored);
-      // One-time migration from the previous brand's session key.
-      const legacy = localStorage.getItem("dost_auth_user");
-      if (legacy) {
-        localStorage.setItem("blackwheel_auth_user", legacy);
-        localStorage.removeItem("dost_auth_user");
-        return JSON.parse(legacy);
-      }
-      return null;
-    } catch (e) {
-      return null;
-    }
-  });
+  const [user, setUser] = useState(null);
+  const [restoring, setRestoring] = useState(() => isSupabaseConfigured());
   const [inventory, setInventory] = useState([]);
   const [deliveries, setDeliveries] = useState([]);
-  const [storageWarning, setStorageWarning] = useState("");
   const [shop, setShop] = useState(null);
   const [shopError, setShopError] = useState("");
-  const [dataNonce, setDataNonce] = useState(0);
   const loadedRef = useRef(false);
-  const repairAttemptedRef = useRef({});
 
   // ---- Multi-tenant shop session --------------------------------------
   // One account IS one shop: the stored or first membership enters
-  // silently, none triggers auto-provisioning. Offline => no shops at all
-  // (pure local mode).
+  // silently, none triggers auto-provisioning. No browser storage: the
+  // session restores from Supabase Auth, the shop from memberships.
   const enterMemberships = (baseUser, memberships) => {
     const list = memberships || [];
     const storedId = getCurrentShopId();
@@ -218,11 +199,6 @@ const App = () => {
       role: (chosen && chosen.role) || baseUser.role || "Staff",
     };
     setUser(full);
-    try {
-      localStorage.setItem("blackwheel_auth_user", JSON.stringify(full));
-    } catch (e) {
-      // ignore
-    }
     return full;
   };
 
@@ -254,19 +230,7 @@ const App = () => {
     try {
       const membership = await p;
       setShopError("");
-      const entered = enterMemberships(baseUser, [membership]);
-      // Signup takeover: the fresh account automatically claims any
-      // browser-local rows into its new shop — no manual upload step.
-      // (Invited users arrive with memberships and skip provisioning.)
-      try {
-        const res = await syncLocalToCloud();
-        if (res && res.ok && (res.totalUploaded > 0 || res.totalFailed > 0)) {
-          setDataNonce((n) => n + 1);
-        }
-      } catch (e) {
-        console.warn("Signup data takeover failed, manual upload remains:", e);
-      }
-      return entered;
+      return enterMemberships(baseUser, [membership]);
     } catch (e) {
       const msg = (e && e.message) || "Could not set up your shop.";
       console.warn("Auto shop provisioning failed:", msg);
@@ -282,20 +246,19 @@ const App = () => {
   const resetWorkspace = () => {
     setTires([]);
     setSales([]);
-    setHotelTires([]);
     setInventory([]);
     setDeliveries([]);
-    setStorageWarning("");
     setShop(null);
     setSelectedComponent("Dashboard");
     setCurrentShopId("");
+    resetSettingsMemory();
     loadedRef.current = false;
   };
 
   const resolveAndEnter = async (baseUser) => {
     if (!isSupabaseConfigured() || !baseUser) {
-      if (baseUser) setUser(baseUser);
-      return baseUser;
+      setUser(null);
+      return null;
     }
     try {
       const resolved = await resolveShopMemberships({
@@ -309,12 +272,8 @@ const App = () => {
         } catch (e) {
           // ignore
         }
+        setUser(null);
         resetWorkspace();
-        try {
-          localStorage.removeItem("blackwheel_auth_user");
-        } catch (e) {
-          // ignore
-        }
         return null;
       }
       return autoProvisionShop(baseUser, (resolved && resolved.memberships) || []);
@@ -334,11 +293,6 @@ const App = () => {
     }
     setUser(null);
     resetWorkspace();
-    try {
-      localStorage.removeItem("blackwheel_auth_user");
-    } catch (e) {
-      // ignore
-    }
   };
 
   // Wire bell icon to actual low-stock count: stock <= lowStockThreshold
@@ -363,48 +317,56 @@ const App = () => {
     TeamManagement: "Team",
   }), []);
 
-  // Sync Supabase Auth session if configured
+  // Restore the Supabase Auth session on load. `restoring` covers the
+  // async gap so refreshes never flash the login screen.
   useEffect(() => {
     let subscription = null;
+    let done = false;
+    const finish = () => {
+      if (!done) {
+        done = true;
+        setRestoring(false);
+      }
+    };
     try {
       if (supabase && supabase.auth) {
+        const toBaseUser = (su) => ({
+          id: su.id,
+          email: su.email,
+          name: su.user_metadata?.full_name || su.email.split('@')[0],
+          role: su.user_metadata?.role || 'Staff',
+          avatar: su.user_metadata?.avatar_url || '',
+        });
         supabase.auth.getSession().then(({ data: { session } }) => {
           if (session?.user) {
-            resolveAndEnter({
-              id: session.user.id,
-              email: session.user.email,
-              name: session.user.user_metadata?.full_name || session.user.email.split('@')[0],
-              role: session.user.user_metadata?.role || 'Staff',
-              avatar: session.user.user_metadata?.avatar_url || '',
-            });
+            setRestoring(true);
+            resolveAndEnter(toBaseUser(session.user)).finally(finish);
+          } else {
+            finish();
           }
         }).catch(() => {
-          // ignore
+          finish();
         });
 
         const { data } = supabase.auth.onAuthStateChange((_event, session) => {
           if (session?.user) {
-            resolveAndEnter({
-              id: session.user.id,
-              email: session.user.email,
-              name: session.user.user_metadata?.full_name || session.user.email.split('@')[0],
-              role: session.user.user_metadata?.role || 'Staff',
-              avatar: session.user.user_metadata?.avatar_url || '',
-            });
+            if (_event === 'INITIAL_SESSION') {
+              setRestoring(true);
+              resolveAndEnter(toBaseUser(session.user)).finally(() => setRestoring(false));
+            } else {
+              resolveAndEnter(toBaseUser(session.user));
+            }
           } else if (_event === 'SIGNED_OUT') {
             setUser(null);
             resetWorkspace();
-            try {
-              localStorage.removeItem("blackwheel_auth_user");
-            } catch (e) {
-              // ignore
-            }
           }
         });
         subscription = data?.subscription;
+      } else {
+        finish();
       }
     } catch (e) {
-      // ignore
+      finish();
     }
 
     return () => {
@@ -413,9 +375,8 @@ const App = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // UUID-first IDs so local rows match Postgres `uuid` PKs.
-  // Legacy localStorage rows may still carry numeric Date.now() ids — all
-  // lookups below use String() comparison so both shapes keep working.
+  // UUID-first IDs so rows match Postgres `uuid` PKs. All lookups below
+  // use String() comparison.
   const newId = () => {
     try {
       if (typeof crypto !== "undefined" && crypto.randomUUID) {
@@ -445,59 +406,6 @@ const App = () => {
     if (raw === undefined || raw === null || raw === "") return NaN;
     const n = Number(raw);
     return Number.isFinite(n) ? n : NaN;
-  };
-
-  const safeParse = (key, fallback) => {
-    try {
-      const raw = localStorage.getItem(cacheKeyFor(key));
-      if (!raw) return fallback;
-      const parsed = JSON.parse(raw);
-      return parsed === null || parsed === undefined ? fallback : parsed;
-    } catch (e) {
-      console.error(`Failed to parse localStorage key "${key}":`, e);
-      return fallback;
-    }
-  };
-
-  const safeSave = (key, value) => {
-    try {
-      localStorage.setItem(cacheKeyFor(key), JSON.stringify(value));
-      return true;
-    } catch (e) {
-      const isQuota =
-        e &&
-        (e.name === "QuotaExceededError" ||
-          e.name === "NS_ERROR_DOM_QUOTA_REACHED" ||
-          e.code === 22);
-      console.error(`Failed to save localStorage key "${key}":`, e);
-      // Quota fallback for tires: retry without embedded base64 images so the
-      // structured data survives even when photos would blow the ~5MB limit.
-      // (Photos prefer Supabase Storage URLs; see uploadTirePhoto.)
-      if (isQuota && key === "tires" && Array.isArray(value)) {
-        try {
-          const stripped = value.map((t) => {
-            if (t && Array.isArray(t.images) && t.images.some((img) => typeof img === "string" && img.startsWith("data:"))) {
-              const kept = (t.images || []).filter(
-                (img) => typeof img === "string" && !img.startsWith("data:")
-              );
-              return { ...t, images: kept };
-            }
-            return t;
-          });
-          localStorage.setItem(cacheKeyFor(key), JSON.stringify(stripped));
-          setStorageWarning(
-            "Browser storage is full — tire photos were dropped to preserve inventory data. Connect Supabase Storage or remove photos."
-          );
-          return true;
-        } catch (e2) {
-          console.error("Quota fallback save also failed:", e2);
-        }
-      }
-      setStorageWarning(
-        "Browser storage is full — recent changes may not persist after refresh. Export a backup from Settings."
-      );
-      return false;
-    }
   };
 
   const prefersDarkMode = useMediaQuery("(prefers-color-scheme: dark)");
@@ -569,7 +477,8 @@ const App = () => {
   );
 
   const loadData = async () => {
-    // Try Supabase first; null = not configured / failed / no shop -> localStorage fallback.
+    // Pure cloud: every read comes from Postgres. No browser storage.
+    await loadShopSettings();
     const [remoteTires, remoteSales, remoteInventory, remoteDeliveries] =
       await Promise.all([
         loadTable("tires"),
@@ -577,84 +486,22 @@ const App = () => {
         loadTable("inventory"),
         loadTable("deliveries"),
       ]);
-    const localTires = safeParse("tires", []);
-    const localSales = safeParse("sales", []);
-    const localInventory = safeParse("inventory", []);
-    const localDeliveries = safeParse("deliveries", []);
-    // Wipe-guard: cloud reachable but returned zero rows while this browser
-    // holds cached rows -> keep the LOCAL rows on screen (the cloud is NOT
-    // authoritative here) and offer a one-click upload instead.
-    // Without this, the empty array overwrites the cache and data is lost.
-    const guard = (remote, local) =>
-      remote !== null && remote.length === 0 && local.length > 0 ? local : remote;
-    const effTires = guard(remoteTires, localTires);
-    const effSales = guard(remoteSales, localSales);
-    const effInventory = guard(remoteInventory, localInventory);
-    const effDeliveries = guard(remoteDeliveries, localDeliveries);
-    setTires(effTires !== null ? effTires : localTires);
-    setSales(effSales !== null ? effSales : localSales);
-    setHotelTires(safeParse("hotelTires", []));
-    setInventory(effInventory !== null ? effInventory : localInventory);
-    setDeliveries(effDeliveries !== null ? effDeliveries : localDeliveries);
+    setTires(remoteTires || []);
+    setSales(remoteSales || []);
+    setInventory(remoteInventory || []);
+    setDeliveries(remoteDeliveries || []);
     loadedRef.current = true;
-    // Silent repair: cloud reachable but empty while this browser holds
-    // cached rows -> upload them in the background (once per shop) and
-    // reload. No banners, no buttons — it just works.
-    if (
-      isSupabaseConfigured() &&
-      shop?.id &&
-      remoteTires !== null &&
-      remoteTires.length === 0 &&
-      localTires.length > 0 &&
-      !repairAttemptedRef.current[shop.id]
-    ) {
-      repairAttemptedRef.current[shop.id] = true;
-      syncLocalToCloud()
-        .then((res) => {
-          if (res && res.ok && (res.totalUploaded > 0 || res.totalFailed > 0)) {
-            setDataNonce((n) => n + 1);
-          }
-        })
-        .catch(() => {
-          // stay silent — local rows remain visible, retry happens next login
-        });
-    }
   };
 
   useEffect(() => {
-    // Cloud mode waits for a shop (tenant isolation); offline loads at once.
+    // Cloud mode waits for a shop; without one there is nothing to load.
     if (isSupabaseConfigured() && !shop) {
       loadedRef.current = false;
       return;
     }
     loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shop?.id, dataNonce]);
-
-  useEffect(() => {
-    if (!loadedRef.current) return;
-    safeSave("tires", tires);
-  }, [tires]);
-
-  useEffect(() => {
-    if (!loadedRef.current) return;
-    safeSave("sales", sales);
-  }, [sales]);
-
-  useEffect(() => {
-    if (!loadedRef.current) return;
-    safeSave("hotelTires", hotelTires);
-  }, [hotelTires]);
-
-  useEffect(() => {
-    if (!loadedRef.current) return;
-    safeSave("inventory", inventory);
-  }, [inventory]);
-
-  useEffect(() => {
-    if (!loadedRef.current) return;
-    safeSave("deliveries", deliveries);
-  }, [deliveries]);
+  }, [shop?.id]);
 
   const addTire = (tire) => {
     const id = tire?.id ?? newId();
@@ -797,13 +644,6 @@ const App = () => {
       const newStock = (Number(current.stock) || 0) - qty;
       updateRow("tires", tireId, { stock: newStock });
     }
-  };
-
-  const addHotelTire = (hotelTire) => {
-    setHotelTires((prevHotelTires) => [
-      ...prevHotelTires,
-      { ...hotelTire, id: hotelTire?.id ?? newId() },
-    ]);
   };
 
   const updateInventory = (tireId, quantity, action) => {
@@ -1197,7 +1037,7 @@ const App = () => {
         return <SaleForm tires={tires} addSale={addSale} salesHistory={sales} onDeleteSale={deleteSale} />;
       case "TireHotel":
         return (
-          <TireHotel hotelTires={hotelTires} addHotelTire={addHotelTire} />
+          <TireHotel />
         );
       case "TireList":
         return (
@@ -1250,6 +1090,21 @@ const App = () => {
   };
 
   if (!user) {
+    // While the saved session restores, hold a loader so refreshes never
+    // flash the login screen.
+    if (restoring) {
+      return (
+        <ThemeProvider theme={theme}>
+          <CssBaseline />
+          <Box sx={{ minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2 }}>
+            <CircularProgress />
+            <Typography variant="body2" color="text.secondary">
+              Opening your shop…
+            </Typography>
+          </Box>
+        </ThemeProvider>
+      );
+    }
     return (
       <ThemeProvider theme={theme}>
         <CssBaseline />
@@ -1264,13 +1119,6 @@ const App = () => {
                 // Memberships already resolved by AuthModal; shop-less users
                 // get a personal shop automatically (no shop typing).
                 autoProvisionShop(u, u.memberships || []);
-              } else {
-                setUser(u);
-                try {
-                  localStorage.setItem("blackwheel_auth_user", JSON.stringify(u));
-                } catch (e) {
-                  // ignore
-                }
               }
             }}
             />
@@ -1455,29 +1303,6 @@ const App = () => {
           <Main open={open}>
             <DrawerHeader />
             <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
-              {storageWarning && (
-                <Paper
-                  elevation={0}
-                  sx={{
-                    p: 2,
-                    mb: 2,
-                    borderRadius: "8px",
-                    bgcolor: "warning.light",
-                    border: "1px solid",
-                    borderColor: "warning.main",
-                  }}
-                >
-                  <Typography variant="body2" color="textSecondary">
-                    {storageWarning}{" "}
-                    <span
-                      style={{ textDecoration: "underline", cursor: "pointer" }}
-                      onClick={() => setStorageWarning("")}
-                    >
-                      Dismiss
-                    </span>
-                  </Typography>
-                </Paper>
-              )}
               <Fade in={true} timeout={1000}>
                 <Paper elevation={3} sx={{ p: 2, borderRadius: "8px" }}>
                   <ErrorBoundary>

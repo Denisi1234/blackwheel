@@ -21,9 +21,8 @@ const MAX_IMAGES = 4;
 const MAX_FILE_SIZE = 1024 * 1024; // ~1MB per image pre-compression
 const MAX_DIMENSION = 1024; // downscale long edge to bound base64 size
 const JPEG_QUALITY = 0.72;
-const LOCAL_STORAGE_BUDGET = 4.5 * 1024 * 1024; // stay under the ~5MB domain cap
 
-// Downscale + JPEG-compress so offline base64 fallback stays small.
+// Downscale + JPEG-compress so photo payloads stay small.
 // A 1MB phone photo typically shrinks to ~80-180KB dataURL after this.
 const compressImageFile = (file) =>
   new Promise((resolve, reject) => {
@@ -67,20 +66,6 @@ const readAsDataUrl = (file) =>
       reject(err);
     }
   });
-
-const estimateLocalUsage = () => {
-  try {
-    let total = 0;
-    for (let i = 0; i < localStorage.length; i += 1) {
-      const k = localStorage.key(i);
-      const v = localStorage.getItem(k) || "";
-      total += (k ? k.length : 0) + v.length;
-    }
-    return total; // ~UTF-16 code units ≈ bytes for ASCII JSON
-  } catch (e) {
-    return 0;
-  }
-};
 
 const StyledPaper = styled(Paper)(({ theme }) => ({
   padding: theme.spacing(3),
@@ -185,8 +170,7 @@ function TireForm({ addTire, tires = [] }) {
       setError(`Maximum ${MAX_IMAGES} images allowed. Only the first ${remainingSlots} valid image(s) were added.`);
     }
 
-    // Prefer Supabase Storage URLs when configured; fall back to COMPRESSED
-    // dataURL for offline. Compression keeps 4 photos well under localStorage quota.
+    // Prefer Supabase Storage URLs; fall back to COMPRESSED dataURL.
     const toStored = async (file) => {
       try {
         const url = await uploadTirePhoto(file);
@@ -203,28 +187,8 @@ function TireForm({ addTire, tires = [] }) {
 
     try {
       const results = await Promise.all(validFiles.map(toStored));
-      // Quota guard: refuse images that would push localStorage past budget.
-      const usage = estimateLocalUsage();
-      const incoming = results.reduce((s, r) => s + String(r || "").length, 0);
-      if (usage + incoming > LOCAL_STORAGE_BUDGET) {
-        const remoteOnly = results.filter((r) => typeof r === "string" && !r.startsWith("data:"));
-        if (remoteOnly.length < results.length) {
-          setError(
-            'Storage nearly full: only cloud-hosted photos were kept. Connect Supabase Storage or remove existing photos to add more.'
-          );
-        }
-        if (remoteOnly.length === 0 && !uploadTirePhoto) {
-          setError('Browser storage is full — cannot add more photos without Supabase Storage.');
-          return;
-        }
-        const keep = remoteOnly.length > 0 ? remoteOnly : [];
-        if (keep.length === 0) return;
-        setTire((prevTire) => ({
-          ...prevTire,
-          images: [...(prevTire.images || []), ...keep].slice(0, MAX_IMAGES)
-        }));
-        return;
-      }
+      // Pure cloud: photos prefer Supabase Storage URLs; compressed dataURLs
+      // persist on the cloud row as fallback. No browser storage involved.
       setTire((prevTire) => ({
         ...prevTire,
         images: [...(prevTire.images || []), ...results].slice(0, MAX_IMAGES)

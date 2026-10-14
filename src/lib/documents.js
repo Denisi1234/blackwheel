@@ -4,6 +4,7 @@
 import "jspdf-autotable";
 import * as XLSX from "xlsx";
 import { getCompany, formatMoney } from "./settings";
+import { getAppLang } from "../components/i18n";
 
 export const DOC_BRAND = {
   primary: [23, 55, 120],
@@ -21,7 +22,7 @@ export function todayStamp() {
 
 export function docLocale() {
   try {
-    return localStorage.getItem('app_lang') === 'sw' ? 'sw-TZ' : undefined;
+    return getAppLang() === 'sw' ? 'sw-TZ' : undefined;
   } catch (e) {
     return undefined;
   }
