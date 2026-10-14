@@ -7,6 +7,7 @@ import {
   Drawer,
   List,
   ListItem,
+  ListItemButton,
   ListItemIcon,
   ListItemText,
   Box,
@@ -18,6 +19,9 @@ import {
   Toolbar,
   Divider,
   Paper,
+  Dialog,
+  DialogTitle,
+  DialogContent,
   useMediaQuery,
   Avatar,
   Tooltip,
@@ -85,7 +89,6 @@ const WorkerTracking = lazy(() => import("./components/WorkerTracking"));
 const AppointmentSystem = lazy(() => import("./components/AppointmentSystem"));
 const Settings = lazy(() => import("./components/Settings"));
 const AuthModal = lazy(() => import("./components/AuthModal"));
-const ShopGate = lazy(() => import("./components/ShopGate"));
 const TeamManagement = lazy(() => import("./components/TeamManagement"));
 
 const drawerWidth = 240;
@@ -189,17 +192,20 @@ const App = () => {
   const [pendingUpload, setPendingUpload] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [shop, setShop] = useState(null);
+  const [shopError, setShopError] = useState("");
+  const [shopPickerOpen, setShopPickerOpen] = useState(false);
   const loadedRef = useRef(false);
 
   // ---- Multi-tenant shop session --------------------------------------
-  // Single shop => enter silently; none/many => ShopGate picks. Offline =>
-  // no shops at all (pure local mode).
+  // One account IS one shop: the stored or first membership enters
+  // silently, none triggers auto-provisioning. Offline => no shops at all
+  // (pure local mode).
   const enterMemberships = (baseUser, memberships) => {
     const list = memberships || [];
     const storedId = getCurrentShopId();
     const match =
       storedId && list.find((m) => String(m.shopId) === String(storedId));
-    const chosen = match || (list.length === 1 ? list[0] : null);
+    const chosen = match || (list.length > 0 ? list[0] : null);
     if (chosen) {
       setShop({
         id: chosen.shopId,
@@ -228,8 +234,7 @@ const App = () => {
 
   // One account IS one shop: a shop-less login auto-provisions a personal
   // shop, so registration stays plain name/email/password with no shop
-  // typing. Invited users (existing memberships) keep their flow untouched.
-  // ShopGate remains only for multi-shop choice and provisioning failures.
+  // typing. Invited users (existing memberships) enter silently.
   const provisioningRef = useRef({});
   const autoProvisionShop = async (baseUser, memberships) => {
     const list = memberships || [];
@@ -254,9 +259,12 @@ const App = () => {
     if (uid) provisioningRef.current[uid] = p;
     try {
       const membership = await p;
+      setShopError("");
       return enterMemberships(baseUser, [membership]);
     } catch (e) {
-      console.warn("Auto shop provisioning failed, showing ShopGate:", (e && e.message) || e);
+      const msg = (e && e.message) || "Could not set up your shop.";
+      console.warn("Auto shop provisioning failed:", msg);
+      setShopError(msg);
       return enterMemberships(baseUser, []);
     } finally {
       if (uid) delete provisioningRef.current[uid];
@@ -1298,26 +1306,48 @@ const App = () => {
     );
   }
 
-  // Fallback gate: only reached when auto-provisioning failed or the user
-  // belongs to several shops and must pick one. Normal users never see this.
+  // No shop yet: provisioning is either still running or it failed
+  // (offline / network). There is no shop setup page — one account is
+  // one shop, created automatically at registration.
   if (isSupabaseConfigured() && !shop) {
     return (
       <ThemeProvider theme={theme}>
         <CssBaseline />
-        <ErrorBoundary>
-          <Suspense fallback={<Box sx={{ display: "flex", justifyContent: "center", p: 4 }}><CircularProgress /></Box>}>
-            <ShopGate
-              authUser={user}
-              memberships={user.memberships || []}
-              onEnter={(m) => {
-                if (!m) return;
-                setShop({ id: m.shopId, name: m.shopName, role: m.role, profileId: m.profileId });
-                setUser((prev) => (prev ? { ...prev, role: m.role } : prev));
-              }}
-              onSignOut={handleSignOut}
-            />
-          </Suspense>
-        </ErrorBoundary>
+        <Container maxWidth="xs" sx={{ minHeight: "100vh", display: "flex", flexDirection: "column", justifyContent: "center", py: 4 }}>
+          {shopError ? (
+            <Paper elevation={0} sx={{ p: 3, border: 1, borderColor: "divider", borderRadius: 2, textAlign: "center" }}>
+              <Typography variant="h6" fontWeight={700} gutterBottom>
+                Couldn't open your shop
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                {shopError} Check your connection, then retry.
+              </Typography>
+              <Box sx={{ display: "flex", gap: 1, justifyContent: "center" }}>
+                <Button
+                  variant="contained"
+                  disableElevation
+                  onClick={() => {
+                    setShopError("");
+                    autoProvisionShop(user, (user && user.memberships) || []);
+                  }}
+                  sx={{ textTransform: "none", fontWeight: 700 }}
+                >
+                  Retry
+                </Button>
+                <Button variant="text" onClick={handleSignOut} sx={{ textTransform: "none" }}>
+                  Sign out
+                </Button>
+              </Box>
+            </Paper>
+          ) : (
+            <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+              <CircularProgress />
+              <Typography variant="body2" color="text.secondary">
+                Opening your shop…
+              </Typography>
+            </Box>
+          )}
+        </Container>
       </ThemeProvider>
     );
   }
@@ -1400,13 +1430,11 @@ const App = () => {
                   </ListItemIcon>
                   <Typography variant="inherit">Settings</Typography>
                 </MenuItem>
-                {isSupabaseConfigured() && (
+                {isSupabaseConfigured() && (user?.memberships || []).length > 1 && (
                   <MenuItem
                     onClick={() => {
                       handleClose();
-                      setCurrentShopId("");
-                      setShop(null);
-                      setSelectedComponent("Dashboard");
+                      setShopPickerOpen(true);
                     }}
                   >
                     <ListItemIcon>
@@ -1516,6 +1544,28 @@ const App = () => {
                 </Paper>
               </Fade>
             </Container>
+            <Dialog open={shopPickerOpen} onClose={() => setShopPickerOpen(false)} maxWidth="xs" fullWidth>
+              <DialogTitle>Switch shop</DialogTitle>
+              <DialogContent dividers>
+                <List disablePadding>
+                  {(user?.memberships || []).map((m) => (
+                    <ListItemButton
+                      key={String(m.shopId)}
+                      selected={shop ? String(shop.id) === String(m.shopId) : false}
+                      onClick={() => {
+                        setShop({ id: m.shopId, name: m.shopName, role: m.role, profileId: m.profileId });
+                        enterShop(m);
+                        setUser((prev) => (prev ? { ...prev, role: m.role } : prev));
+                        setSelectedComponent("Dashboard");
+                        setShopPickerOpen(false);
+                      }}
+                    >
+                      <ListItemText primary={m.shopName} secondary={m.role} />
+                    </ListItemButton>
+                  ))}
+                </List>
+              </DialogContent>
+            </Dialog>
           </Main>
         </Box>
       </Router>

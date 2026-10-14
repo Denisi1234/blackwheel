@@ -45,7 +45,7 @@ kubectl -n blackwheel rollout status deploy/blackwheel-web
 
 ## 4. Pilot checklist (1 real shop first)
 
-- [ ] Sign up → shop created, creator is `Admin` (`team.js:124`).
+- [ ] Sign up → personal shop auto-created, creator is `Admin` (no shop typing; `ensurePersonalShop`).
 - [ ] Invite `Technician/Sales` by email; stranger lands `Staff` pending.
 - [ ] Add tire → sell → void sale restores stock; profit = (sale − cost) × qty.
 - [ ] WorkerTracking as `Sales` shows read-only banner; as `Technician` can complete tasks.
