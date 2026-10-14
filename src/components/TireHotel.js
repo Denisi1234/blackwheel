@@ -41,6 +41,7 @@ import {
   updateRow,
   deleteRow,
   newId,
+  cacheKeyFor,
 } from "../lib/store";
 
 // Local component overrides only. Palette / mode come from the app-level
@@ -156,7 +157,7 @@ function TireHotel() {
 
   const safeParse = (key) => {
     try {
-      const raw = localStorage.getItem(key);
+      const raw = localStorage.getItem(cacheKeyFor(key));
       if (!raw) return null;
       const parsed = JSON.parse(raw);
       return Array.isArray(parsed) ? parsed : null;
@@ -193,7 +194,7 @@ function TireHotel() {
   useEffect(() => {
     if (!loadedRef.current) return;
     try {
-      localStorage.setItem('hotelTires', JSON.stringify(hotelTires));
+      localStorage.setItem(cacheKeyFor('hotelTires'), JSON.stringify(hotelTires));
     } catch (e) {
       // storage unavailable
     }
@@ -202,7 +203,7 @@ function TireHotel() {
   useEffect(() => {
     if (!loadedRef.current) return;
     try {
-      localStorage.setItem('hotelCustomers', JSON.stringify(customers));
+      localStorage.setItem(cacheKeyFor('hotelCustomers'), JSON.stringify(customers));
     } catch (e) {
       // storage unavailable
     }

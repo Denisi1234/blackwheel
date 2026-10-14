@@ -59,6 +59,7 @@ import {
   loadTable,
   insertRow,
   syncLocalToCloud,
+  cacheKeyFor,
   updateRow,
   deleteRow,
   deleteRowsByTireId,
@@ -271,6 +272,22 @@ const App = () => {
     }
   };
 
+  // Drop all workspace state on sign-out/account change so the next login
+  // never flashes or reuses the previous account's data (shared devices).
+  const resetWorkspace = () => {
+    setTires([]);
+    setSales([]);
+    setHotelTires([]);
+    setInventory([]);
+    setDeliveries([]);
+    setPendingUpload(null);
+    setStorageWarning("");
+    setShop(null);
+    setSelectedComponent("Dashboard");
+    setCurrentShopId("");
+    loadedRef.current = false;
+  };
+
   const resolveAndEnter = async (baseUser) => {
     if (!isSupabaseConfigured() || !baseUser) {
       if (baseUser) setUser(baseUser);
@@ -288,14 +305,12 @@ const App = () => {
         } catch (e) {
           // ignore
         }
-        setUser(null);
-        setShop(null);
+        resetWorkspace();
         try {
           localStorage.removeItem("blackwheel_auth_user");
         } catch (e) {
           // ignore
         }
-        setCurrentShopId("");
         return null;
       }
       return autoProvisionShop(baseUser, (resolved && resolved.memberships) || []);
@@ -314,13 +329,12 @@ const App = () => {
       // ignore
     }
     setUser(null);
-    setShop(null);
+    resetWorkspace();
     try {
       localStorage.removeItem("blackwheel_auth_user");
     } catch (e) {
       // ignore
     }
-    setCurrentShopId("");
   };
 
   // Wire bell icon to actual low-stock count: stock <= lowStockThreshold
@@ -375,13 +389,12 @@ const App = () => {
             });
           } else if (_event === 'SIGNED_OUT') {
             setUser(null);
-            setShop(null);
+            resetWorkspace();
             try {
               localStorage.removeItem("blackwheel_auth_user");
             } catch (e) {
               // ignore
             }
-            setCurrentShopId("");
           }
         });
         subscription = data?.subscription;
@@ -432,7 +445,7 @@ const App = () => {
 
   const safeParse = (key, fallback) => {
     try {
-      const raw = localStorage.getItem(key);
+      const raw = localStorage.getItem(cacheKeyFor(key));
       if (!raw) return fallback;
       const parsed = JSON.parse(raw);
       return parsed === null || parsed === undefined ? fallback : parsed;
@@ -444,7 +457,7 @@ const App = () => {
 
   const safeSave = (key, value) => {
     try {
-      localStorage.setItem(key, JSON.stringify(value));
+      localStorage.setItem(cacheKeyFor(key), JSON.stringify(value));
       return true;
     } catch (e) {
       const isQuota =
@@ -467,7 +480,7 @@ const App = () => {
             }
             return t;
           });
-          localStorage.setItem(key, JSON.stringify(stripped));
+          localStorage.setItem(cacheKeyFor(key), JSON.stringify(stripped));
           setStorageWarning(
             "Browser storage is full — tire photos were dropped to preserve inventory data. Connect Supabase Storage or remove photos."
           );
@@ -1537,7 +1550,7 @@ const App = () => {
               <Fade in={true} timeout={1000}>
                 <Paper elevation={3} sx={{ p: 2, borderRadius: "8px" }}>
                   <ErrorBoundary>
-                    <Suspense fallback={<Box sx={{ display: "flex", justifyContent: "center", p: 4 }}><CircularProgress /></Box>}>
+                    <Suspense key={shop?.id || "local"} fallback={<Box sx={{ display: "flex", justifyContent: "center", p: 4 }}><CircularProgress /></Box>}>
                       {renderComponent()}
                     </Suspense>
                   </ErrorBoundary>

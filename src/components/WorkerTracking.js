@@ -53,7 +53,7 @@ import { jsPDF } from "jspdf";
 import "jspdf-autotable";
 import SuccessModal from "./SuccessModal";
 import { downloadCsv, datedName, paintHeader, paintFooter, moneyTable, fmtDate } from "../lib/documents";
-import { loadTable, insertRow, updateRow, deleteRow, newId, isUuid, isSupabaseConfigured } from "../lib/store";
+import { loadTable, insertRow, updateRow, deleteRow, newId, isUuid, isSupabaseConfigured, cacheGet, cacheSet } from "../lib/store";
 import { getWorkerPermissions } from "../lib/team";
 
 const TASK_TYPES = ["Removal", "Fitting", "Repair", "Maintenance", "Inspection"];
@@ -163,8 +163,8 @@ const WorkerTracking = ({ user = null, shop = null }) => {
           let w = [];
           let t = [];
           try {
-            w = JSON.parse(localStorage.getItem("workers") || "[]");
-            t = JSON.parse(localStorage.getItem("tasks") || "[]");
+            w = cacheGet("workers", []);
+            t = cacheGet("tasks", []);
           } catch (e) {
             // ignore corrupt storage
           }
@@ -195,8 +195,8 @@ const WorkerTracking = ({ user = null, shop = null }) => {
   useEffect(() => {
     if (!loadedRef.current) return;
     try {
-      localStorage.setItem("workers", JSON.stringify(workers));
-      localStorage.setItem("tasks", JSON.stringify(tasks));
+      cacheSet("workers", workers);
+      cacheSet("tasks", tasks);
     } catch (e) {
       // storage full / unavailable — app keeps working in-memory
     }

@@ -23,6 +23,7 @@ import {
   deleteRow,
   newId,
   isUuid,
+  cacheKeyFor,
 } from '../lib/store';
 import {
   paintHeader,
@@ -101,7 +102,7 @@ const VehicleTracking = () => {
                     updateStatistics(joined);
                     updateUpcomingServices(joined);
                 } else {
-                    const raw = localStorage.getItem('vehicles');
+                    const raw = localStorage.getItem(cacheKeyFor('vehicles'));
                     const savedVehicles = raw ? JSON.parse(raw) : [];
                     const normalized = withIds(
                         Array.isArray(savedVehicles)
@@ -127,7 +128,7 @@ const VehicleTracking = () => {
     useEffect(() => {
         if (!loadedRef.current) return;
         try {
-            localStorage.setItem('vehicles', JSON.stringify(vehicles));
+            localStorage.setItem(cacheKeyFor('vehicles'), JSON.stringify(vehicles));
         } catch (e) {
             // storage unavailable
         }

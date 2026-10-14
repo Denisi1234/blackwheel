@@ -90,6 +90,8 @@ import {
   newId,
   isUuid,
   isSupabaseConfigured,
+  cacheGet,
+  cacheSet,
 } from "../lib/store";
 import { formatTireLabel } from "../lib/tireIdentity";
 import {
@@ -314,23 +316,10 @@ const CurrentAccount = ({ tires = [], sales = [], deliveries = [], user = null, 
   });
   const [currencies] = useState(["TZS", "USD", "EUR", "GBP"]);
 
-  const safeParse = (key, fallback) => {
-    try {
-      const raw = localStorage.getItem(key);
-      if (!raw) return fallback;
-      const parsed = JSON.parse(raw);
-      return parsed === null || parsed === undefined ? fallback : parsed;
-    } catch (e) {
-      return fallback;
-    }
-  };
+  const safeParse = (key, fallback) => cacheGet(key, fallback);
 
   const safeSave = (key, value) => {
-    try {
-      localStorage.setItem(key, JSON.stringify(value));
-    } catch (e) {
-      // ignore quota errors — Supabase stays source of truth when configured
-    }
+    cacheSet(key, value);
   };
 
   // Supabase-first load; localStorage fallback keeps the module working offline.

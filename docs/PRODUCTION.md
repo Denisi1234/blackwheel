@@ -68,6 +68,7 @@ This is filtering, not deletion. Check in order:
 4. **No-shop loads no longer wipe cache.** `loadTable` returns `null` (local fallback) when no shop is selected instead of `[]`. The app also warns in the UI when cloud returns 0 tires but the browser cache had rows.
 5. **Browser vs device.** Offline mode lives in `localStorage` per browser. Different device/incognito = empty until Supabase sync. Export JSON backup from Settings before switching devices.
 6. **Local-only rows never uploaded.** Records created before a shop was selected (or while cloud writes failed) live only in that browser. The app now keeps them on screen with a warning banner instead of wiping them — click **Upload N local records to cloud** (or Settings → **Sync Local Data to Cloud**) on the device that holds the data, then refresh other devices.
+7. **Shared devices / account switching.** Browser caches are namespaced per shop (`<key>::<shop_id>`), workspace state is cleared on sign-out, and screens remount on shop change — account B never sees account A's data. Every screen dual-writes to Supabase (fire-and-forget, local UI stays instant), so switching accounts is: sign out → sign in → cloud reloads in seconds. If a second account shows empty, its rows were never uploaded: run the Upload step on the original device first.
 
 ## 7. Ops notes / known limits
 

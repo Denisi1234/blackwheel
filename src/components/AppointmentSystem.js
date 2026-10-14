@@ -67,6 +67,8 @@ import {
   updateRow,
   deleteRow,
   newId,
+  cacheGet,
+  cacheSet,
 } from "../lib/store";
 
 const localizer = momentLocalizer(moment);
@@ -128,11 +130,8 @@ const AppointmentSystem = () => {
         if (remote !== null) {
           setAppointments(remote);
         } else {
-          const storedAppointments = localStorage.getItem("appointments");
-          if (storedAppointments) {
-            const parsed = JSON.parse(storedAppointments);
-            if (Array.isArray(parsed)) setAppointments(parsed);
-          }
+          const parsed = cacheGet("appointments", []);
+          if (Array.isArray(parsed)) setAppointments(parsed);
         }
       } catch (e) {
         // ignore corrupt storage
@@ -146,7 +145,7 @@ const AppointmentSystem = () => {
   useEffect(() => {
     if (!loadedRef.current) return;
     try {
-      localStorage.setItem("appointments", JSON.stringify(appointments));
+      cacheSet("appointments", appointments);
     } catch (e) {
       // storage unavailable
     }

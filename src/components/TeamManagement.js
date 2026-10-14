@@ -37,6 +37,7 @@ import {
   deleteRow,
   newId,
   isSupabaseConfigured,
+  cacheKeyFor,
 } from '../lib/store';
 import { TEAM_ROLES, INVITE_ROLES } from '../lib/team';
 
@@ -169,7 +170,7 @@ function TeamManagement({ shop = null, currentUser = null, onShopRenamed = null 
 
   const safeParse = () => {
     try {
-      const raw = localStorage.getItem(FALLBACK_KEY);
+      const raw = localStorage.getItem(cacheKeyFor(FALLBACK_KEY));
       const parsed = raw ? JSON.parse(raw) : [];
       return Array.isArray(parsed) ? parsed : [];
     } catch (e) {
@@ -208,7 +209,7 @@ function TeamManagement({ shop = null, currentUser = null, onShopRenamed = null 
   useEffect(() => {
     if (!loadedRef.current) return;
     try {
-      localStorage.setItem(FALLBACK_KEY, JSON.stringify(profiles));
+      localStorage.setItem(cacheKeyFor(FALLBACK_KEY), JSON.stringify(profiles));
     } catch (e) {
       // ignore
     }

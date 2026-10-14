@@ -95,6 +95,62 @@ export function setCurrentShopId(id) {
   }
 }
 
+// ---------- Shop-scoped browser cache ----------
+// Business-data caches must never leak across shops/accounts sharing one
+// browser: keys are namespaced by the active shop id while cloud mode is on.
+// Offline / no-shop keeps the legacy plain key. A legacy global cache is
+// adopted once into the current shop scope (single-shop browsers keep their
+// unsynced rows; multi-shop browsers should sync before switching).
+const LEGACY_ADOPTED = {};
+
+export function cacheKeyFor(key) {
+  try {
+    if (!isSupabaseConfigured()) return key;
+    const sid = getCurrentShopId();
+    return sid ? `${key}::${sid}` : key;
+  } catch (e) {
+    return key;
+  }
+}
+
+function adoptLegacyCache(key, scoped) {
+  if (scoped === key || LEGACY_ADOPTED[scoped]) return;
+  LEGACY_ADOPTED[scoped] = true;
+  try {
+    if (localStorage.getItem(scoped) !== null) return;
+    const raw = localStorage.getItem(key);
+    if (raw === null) return;
+    localStorage.setItem(scoped, raw);
+    localStorage.removeItem(key);
+  } catch (e) {
+    // ignore
+  }
+}
+
+export function cacheGet(key, fallback) {
+  const scoped = cacheKeyFor(key);
+  adoptLegacyCache(key, scoped);
+  try {
+    const raw = localStorage.getItem(scoped);
+    if (raw === null || raw === undefined) return fallback;
+    const parsed = JSON.parse(raw);
+    return parsed === null || parsed === undefined ? fallback : parsed;
+  } catch (e) {
+    return fallback;
+  }
+}
+
+export function cacheSet(key, value) {
+  const scoped = cacheKeyFor(key);
+  adoptLegacyCache(key, scoped);
+  try {
+    localStorage.setItem(scoped, JSON.stringify(value));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 // App invoice statuses <-> Postgres check constraint values.
 const INVOICE_STATUS_TO_DB = { Paid: "Ödendi", Unpaid: "Ödenmedi", Cancelled: "İptal" };
 const INVOICE_STATUS_FROM_DB = { "Ödendi": "Paid", "Ödenmedi": "Unpaid", "İptal": "Cancelled" };
@@ -826,14 +882,8 @@ async function fetchRemoteIds(table, shopId) {
 }
 
 function readLocalRows(key) {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (e) {
-    return [];
-  }
+  const parsed = cacheGet(key, []);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 // Upload every local-only row to Supabase under the current shop.
