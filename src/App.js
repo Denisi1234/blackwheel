@@ -7,7 +7,6 @@ import {
   Drawer,
   List,
   ListItem,
-  ListItemButton,
   ListItemIcon,
   ListItemText,
   Box,
@@ -19,9 +18,6 @@ import {
   Toolbar,
   Divider,
   Paper,
-  Dialog,
-  DialogTitle,
-  DialogContent,
   useMediaQuery,
   Avatar,
   Tooltip,
@@ -47,14 +43,12 @@ import NotificationsIcon from "@mui/icons-material/Notifications";
 import TireRepairIcon from "@mui/icons-material/BuildCircle";
 import AnalyticsIcon from "@mui/icons-material/Analytics";
 import LocalShippingIcon from "@mui/icons-material/LocalShipping";
-import StoreIcon from "@mui/icons-material/Store";
 import DirectionsCarIcon from "@mui/icons-material/DirectionsCar";
 import PersonIcon from "@mui/icons-material/Person";
 import InventoryIcon from "@mui/icons-material/Inventory";
 import GroupIcon from "@mui/icons-material/Group";
 import { supabase } from "./lib/supabaseClient";
-import CalendarTodayIcon from "@mui/icons-material/CalendarToday";
-import { getLowStockThreshold, getCurrency } from "./lib/settings";
+import CalendarTodayIcon from "@mui/icons-material/CalendarToday";import { getLowStockThreshold, getCurrency } from "./lib/settings";
 import {
   loadTable,
   insertRow,
@@ -190,13 +184,11 @@ const App = () => {
   const [inventory, setInventory] = useState([]);
   const [deliveries, setDeliveries] = useState([]);
   const [storageWarning, setStorageWarning] = useState("");
-  const [pendingUpload, setPendingUpload] = useState(null);
-  const [syncing, setSyncing] = useState(false);
   const [shop, setShop] = useState(null);
   const [shopError, setShopError] = useState("");
-  const [shopPickerOpen, setShopPickerOpen] = useState(false);
   const [dataNonce, setDataNonce] = useState(0);
   const loadedRef = useRef(false);
+  const repairAttemptedRef = useRef({});
 
   // ---- Multi-tenant shop session --------------------------------------
   // One account IS one shop: the stored or first membership enters
@@ -293,7 +285,6 @@ const App = () => {
     setHotelTires([]);
     setInventory([]);
     setDeliveries([]);
-    setPendingUpload(null);
     setStorageWarning("");
     setShop(null);
     setSelectedComponent("Dashboard");
@@ -605,36 +596,29 @@ const App = () => {
     setHotelTires(safeParse("hotelTires", []));
     setInventory(effInventory !== null ? effInventory : localInventory);
     setDeliveries(effDeliveries !== null ? effDeliveries : localDeliveries);
-    // Diagnostic: cloud reachable but returned zero rows while this browser
-    // previously cached rows -> rows were never uploaded, or wrong shop, or
-    // RLS/filtering. NOT deleted data.
+    loadedRef.current = true;
+    // Silent repair: cloud reachable but empty while this browser holds
+    // cached rows -> upload them in the background (once per shop) and
+    // reload. No banners, no buttons — it just works.
     if (
       isSupabaseConfigured() &&
       shop?.id &&
       remoteTires !== null &&
       remoteTires.length === 0 &&
-      localTires.length > 0
+      localTires.length > 0 &&
+      !repairAttemptedRef.current[shop.id]
     ) {
-      setPendingUpload({
-        tires: localTires.length,
-        sales:
-          remoteSales !== null && remoteSales.length === 0 ? localSales.length : 0,
-        inventory:
-          remoteInventory !== null && remoteInventory.length === 0
-            ? localInventory.length
-            : 0,
-        deliveries:
-          remoteDeliveries !== null && remoteDeliveries.length === 0
-            ? localDeliveries.length
-            : 0,
-      });
-      setStorageWarning(
-        `Showing ${localTires.length} locally cached tire(s) for shop "${shop?.name || shop.id}" — the cloud has none yet. They were never uploaded (or belong to another shop). Your data is NOT deleted. Upload it now or dismiss.`
-      );
-    } else {
-      setPendingUpload(null);
+      repairAttemptedRef.current[shop.id] = true;
+      syncLocalToCloud()
+        .then((res) => {
+          if (res && res.ok && (res.totalUploaded > 0 || res.totalFailed > 0)) {
+            setDataNonce((n) => n + 1);
+          }
+        })
+        .catch(() => {
+          // stay silent — local rows remain visible, retry happens next login
+        });
     }
-    loadedRef.current = true;
   };
 
   useEffect(() => {
@@ -646,31 +630,6 @@ const App = () => {
     loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shop?.id, dataNonce]);
-
-  const handleSyncUpload = async () => {
-    if (syncing) return;
-    setSyncing(true);
-    try {
-      const res = await syncLocalToCloud();
-      if (!res || !res.ok) {
-        setStorageWarning(
-          res && res.error
-            ? `Upload failed: ${res.error}`
-            : "Upload failed. Check your connection and shop, then retry."
-        );
-      } else if (res.totalFailed > 0) {
-        setStorageWarning(
-          `Uploaded ${res.totalUploaded} record(s); ${res.totalFailed} failed (see console). ${res.totalSkipped} already in the cloud were skipped.`
-        );
-      } else {
-        setStorageWarning("");
-        setPendingUpload(null);
-      }
-      await loadData();
-    } finally {
-      setSyncing(false);
-    }
-  };
 
   useEffect(() => {
     if (!loadedRef.current) return;
@@ -1176,11 +1135,6 @@ const App = () => {
           <Typography variant="body2" color="textSecondary">
             {user?.role || "Staff"}
           </Typography>
-          {shop?.name && (
-            <Typography variant="caption" color="textSecondary">
-              {shop.name}
-            </Typography>
-          )}
         </Box>
       </Box>
       <Divider />
@@ -1288,13 +1242,7 @@ const App = () => {
         return <Settings />;
       case "TeamManagement":
         return (
-          <TeamManagement
-            shop={shop}
-            currentUser={user}
-            onShopRenamed={(name) =>
-              setShop((prev) => (prev ? { ...prev, name } : prev))
-            }
-          />
+          <TeamManagement shop={shop} currentUser={user} />
         );
       default:
         return <Dashboard tires={tires} sales={sales} />;
@@ -1456,19 +1404,6 @@ const App = () => {
                   </ListItemIcon>
                   <Typography variant="inherit">Settings</Typography>
                 </MenuItem>
-                {isSupabaseConfigured() && (user?.memberships || []).length > 1 && (
-                  <MenuItem
-                    onClick={() => {
-                      handleClose();
-                      setShopPickerOpen(true);
-                    }}
-                  >
-                    <ListItemIcon>
-                      <StoreIcon fontSize="small" />
-                    </ListItemIcon>
-                    <Typography variant="inherit">Switch shop</Typography>
-                  </MenuItem>
-                )}
                 <MenuItem
                   onClick={async () => {
                     handleClose();
@@ -1534,23 +1469,6 @@ const App = () => {
                 >
                   <Typography variant="body2" color="textSecondary">
                     {storageWarning}{" "}
-                    {pendingUpload && (
-                      <Button
-                        size="small"
-                        variant="contained"
-                        disableElevation
-                        disabled={syncing}
-                        onClick={handleSyncUpload}
-                        sx={{ ml: 1, mr: 1, textTransform: "none", fontWeight: 700 }}
-                      >
-                        {syncing
-                          ? "Uploading…"
-                          : `Upload ${Object.values(pendingUpload).reduce(
-                              (n, v) => n + (Number(v) || 0),
-                              0
-                            )} local records to cloud`}
-                      </Button>
-                    )}
                     <span
                       style={{ textDecoration: "underline", cursor: "pointer" }}
                       onClick={() => setStorageWarning("")}
@@ -1570,28 +1488,6 @@ const App = () => {
                 </Paper>
               </Fade>
             </Container>
-            <Dialog open={shopPickerOpen} onClose={() => setShopPickerOpen(false)} maxWidth="xs" fullWidth>
-              <DialogTitle>Switch shop</DialogTitle>
-              <DialogContent dividers>
-                <List disablePadding>
-                  {(user?.memberships || []).map((m) => (
-                    <ListItemButton
-                      key={String(m.shopId)}
-                      selected={shop ? String(shop.id) === String(m.shopId) : false}
-                      onClick={() => {
-                        setShop({ id: m.shopId, name: m.shopName, role: m.role, profileId: m.profileId });
-                        enterShop(m);
-                        setUser((prev) => (prev ? { ...prev, role: m.role } : prev));
-                        setSelectedComponent("Dashboard");
-                        setShopPickerOpen(false);
-                      }}
-                    >
-                      <ListItemText primary={m.shopName} secondary={m.role} />
-                    </ListItemButton>
-                  ))}
-                </List>
-              </DialogContent>
-            </Dialog>
           </Main>
         </Box>
       </Router>

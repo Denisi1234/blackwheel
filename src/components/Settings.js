@@ -19,7 +19,6 @@ import {
   DialogActions,
 } from "@mui/material";
 import SuccessModal from "./SuccessModal";
-import { syncLocalToCloud, isSupabaseConfigured } from "../lib/store";
 
 function loadJSON(key, fallback) {
   try {
@@ -75,41 +74,6 @@ function Settings() {
   const [isSaving, setIsSaving] = useState(false);
   const [successModal, setSuccessModal] = useState({ open: false, title: "", message: "", details: [] });
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
-  const [syncing, setSyncing] = useState(false);
-
-  // Push browser-only rows up to Supabase under the current shop.
-  // Needed when records were created before a shop was selected (or while
-  // cloud writes failed) — otherwise other devices never see them.
-  const handleSyncToCloud = async () => {
-    if (syncing) return;
-    setSyncing(true);
-    setMessage("");
-    try {
-      const res = await syncLocalToCloud();
-      if (!res || !res.ok) {
-        setMessage(`Cloud sync failed: ${res && res.error ? res.error : "unknown error."}`);
-        return;
-      }
-      const up = res.totalUploaded || 0;
-      const fail = res.totalFailed || 0;
-      const skip = res.totalSkipped || 0;
-      setMessage(
-        `Cloud sync done: ${up} uploaded, ${skip} already in cloud, ${fail} failed. Refresh to reload from the cloud.`
-      );
-      setSuccessModal({
-        open: true,
-        title: "Cloud Sync Complete",
-        message: `Uploaded ${up} local record(s) to your shop in the cloud.`,
-        details: [
-          { label: "Uploaded", value: String(up) },
-          { label: "Already in cloud", value: String(skip) },
-          { label: "Failed", value: String(fail) },
-        ],
-      });
-    } finally {
-      setSyncing(false);
-    }
-  };
 
   const handleCompanyChange = (field) => (e) => {
     const next = Object.assign({}, company, { [field]: e.target.value });
@@ -399,11 +363,6 @@ function Settings() {
           <Button variant="contained" onClick={handleExport}>
             Export All Data
           </Button>
-          {isSupabaseConfigured() && (
-            <Button variant="contained" color="success" onClick={handleSyncToCloud} disabled={syncing}>
-              {syncing ? "Syncing…" : "Sync Local Data to Cloud"}
-            </Button>
-          )}
           <Button variant="outlined" color="error" onClick={handleClearAll}>
             Clear All Data
           </Button>

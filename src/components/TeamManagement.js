@@ -72,11 +72,6 @@ const STR = {
     errSelfDeactivate: 'You cannot deactivate yourself.',
     errSelfRemove: 'You cannot remove yourself.',
     msgRemoved: 'Team member removed.',
-    shopSettings: 'Shop settings',
-    shopName: 'Shop name',
-    saveShop: 'Save name',
-    errShopName: 'Enter a shop name.',
-    msgShopRenamed: 'Shop name updated.',
     invitedAs: (name, role, email) => `${name} invited as ${role}. They register with ${email} and get the role automatically.`,
     roleAdmin: 'Admin',
     roleTechnician: 'Technician',
@@ -111,11 +106,6 @@ const STR = {
     errSelfDeactivate: 'Huwezi kujizima mwenyewe.',
     errSelfRemove: 'Huwezi kujiondoa mwenyewe.',
     msgRemoved: 'Mtu wa timu ameondolewa.',
-    shopSettings: 'Mipangilio ya duka',
-    shopName: 'Jina la duka',
-    saveShop: 'Hifadhi jina',
-    errShopName: 'Ingiza jina la duka.',
-    msgShopRenamed: 'Jina la duka limehifadhiwa.',
     invitedAs: (name, role, email) => `${name} amealikwa kama ${role}. Atajisajili na ${email} na kupokea wadhfa kiotomatiki.`,
     roleAdmin: 'Msimamizi',
     roleTechnician: 'Fundi',
@@ -139,7 +129,7 @@ function roleLabel(t, role) {
   return t.roleStaff;
 }
 
-function TeamManagement({ shop = null, currentUser = null, onShopRenamed = null }) {
+function TeamManagement({ shop = null, currentUser = null }) {
   const shopId = shop?.id || '';
   // Offline single-device mode has no roles backend — the local user is admin.
   const isAdmin =
@@ -150,8 +140,6 @@ function TeamManagement({ shop = null, currentUser = null, onShopRenamed = null 
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
   const [form, setForm] = useState({ name: '', email: '', role: 'Sales' });
-  const [shopNameDraft, setShopNameDraft] = useState('');
-  const [savingShop, setSavingShop] = useState(false);
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(10);
   const [langTick, setLangTick] = useState(0);
@@ -303,31 +291,10 @@ function TeamManagement({ shop = null, currentUser = null, onShopRenamed = null 
     showMsg(setInfo, t.msgRemoved);
   };
 
-  const handleRenameShop = async () => {
-    const name = String(shopNameDraft || '').trim();
-    if (!name) {
-      showMsg(setError, t.errShopName);
-      return;
-    }
-    if (!shop?.id) return;
-    setSavingShop(true);
-    try {
-      await updateRow('shops', shop.id, { name });
-      if (typeof onShopRenamed === 'function') onShopRenamed(name);
-      showMsg(setInfo, t.msgShopRenamed);
-    } finally {
-      setSavingShop(false);
-    }
-  };
-
-  useEffect(() => {
-    setShopNameDraft(shop?.name || '');
-  }, [shop?.id, shop?.name]);
-
   return (
     <Box>
       <Typography variant="h5" gutterBottom color="primary" fontWeight="bold">
-        {t.team}{shop?.name ? ` — ${shop.name}` : ''}
+        {t.team}
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         {t.sub}
@@ -360,26 +327,6 @@ function TeamManagement({ shop = null, currentUser = null, onShopRenamed = null 
             </FormControl>
             <Button type="submit" variant="contained" disableElevation disabled={saving} startIcon={<PersonAddIcon />} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 1 }}>
               {saving ? <CircularProgress size={22} color="inherit" /> : t.inviteBtn}
-            </Button>
-          </Box>
-        </Paper>
-      )}
-
-      {isAdmin && shop?.id && (
-        <Paper elevation={0} sx={{ p: 2, mb: 2, border: 1, borderColor: 'divider', borderRadius: 2 }}>
-          <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>
-            {t.shopSettings}
-          </Typography>
-          <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-            <TextField
-              size="small"
-              label={t.shopName}
-              value={shopNameDraft}
-              onChange={(e) => setShopNameDraft(e.target.value)}
-              sx={{ minWidth: 240 }}
-            />
-            <Button variant="outlined" disableElevation disabled={savingShop} onClick={handleRenameShop} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 1 }}>
-              {savingShop ? <CircularProgress size={22} color="inherit" /> : t.saveShop}
             </Button>
           </Box>
         </Paper>
