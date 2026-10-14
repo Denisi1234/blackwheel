@@ -10,6 +10,7 @@ import {
   ListItemIcon,
   ListItemText,
   Box,
+  Button,
   Container,
   Typography,
   IconButton,
@@ -53,6 +54,7 @@ import { getLowStockThreshold, getCurrency } from "./lib/settings";
 import {
   loadTable,
   insertRow,
+  syncLocalToCloud,
   updateRow,
   deleteRow,
   deleteRowsByTireId,
@@ -183,6 +185,8 @@ const App = () => {
   const [inventory, setInventory] = useState([]);
   const [deliveries, setDeliveries] = useState([]);
   const [storageWarning, setStorageWarning] = useState("");
+  const [pendingUpload, setPendingUpload] = useState(null);
+  const [syncing, setSyncing] = useState(false);
   const [shop, setShop] = useState(null);
   const loadedRef = useRef(false);
 
@@ -501,52 +505,100 @@ const App = () => {
     [darkMode]
   );
 
+  const loadData = async () => {
+    // Try Supabase first; null = not configured / failed / no shop -> localStorage fallback.
+    const [remoteTires, remoteSales, remoteInventory, remoteDeliveries] =
+      await Promise.all([
+        loadTable("tires"),
+        loadTable("sales"),
+        loadTable("inventory"),
+        loadTable("deliveries"),
+      ]);
+    const localTires = safeParse("tires", []);
+    const localSales = safeParse("sales", []);
+    const localInventory = safeParse("inventory", []);
+    const localDeliveries = safeParse("deliveries", []);
+    // Wipe-guard: cloud reachable but returned zero rows while this browser
+    // holds cached rows -> keep the LOCAL rows on screen (the cloud is NOT
+    // authoritative here) and offer a one-click upload instead.
+    // Without this, the empty array overwrites the cache and data is lost.
+    const guard = (remote, local) =>
+      remote !== null && remote.length === 0 && local.length > 0 ? local : remote;
+    const effTires = guard(remoteTires, localTires);
+    const effSales = guard(remoteSales, localSales);
+    const effInventory = guard(remoteInventory, localInventory);
+    const effDeliveries = guard(remoteDeliveries, localDeliveries);
+    setTires(effTires !== null ? effTires : localTires);
+    setSales(effSales !== null ? effSales : localSales);
+    setHotelTires(safeParse("hotelTires", []));
+    setInventory(effInventory !== null ? effInventory : localInventory);
+    setDeliveries(effDeliveries !== null ? effDeliveries : localDeliveries);
+    // Diagnostic: cloud reachable but returned zero rows while this browser
+    // previously cached rows -> rows were never uploaded, or wrong shop, or
+    // RLS/filtering. NOT deleted data.
+    if (
+      isSupabaseConfigured() &&
+      shop?.id &&
+      remoteTires !== null &&
+      remoteTires.length === 0 &&
+      localTires.length > 0
+    ) {
+      setPendingUpload({
+        tires: localTires.length,
+        sales:
+          remoteSales !== null && remoteSales.length === 0 ? localSales.length : 0,
+        inventory:
+          remoteInventory !== null && remoteInventory.length === 0
+            ? localInventory.length
+            : 0,
+        deliveries:
+          remoteDeliveries !== null && remoteDeliveries.length === 0
+            ? localDeliveries.length
+            : 0,
+      });
+      setStorageWarning(
+        `Showing ${localTires.length} locally cached tire(s) for shop "${shop?.name || shop.id}" — the cloud has none yet. They were never uploaded (or belong to another shop). Your data is NOT deleted. Upload it now or dismiss.`
+      );
+    } else {
+      setPendingUpload(null);
+    }
+    loadedRef.current = true;
+  };
+
   useEffect(() => {
     // Cloud mode waits for a shop (tenant isolation); offline loads at once.
     if (isSupabaseConfigured() && !shop) {
       loadedRef.current = false;
       return;
     }
-    const loadData = async () => {
-      // Try Supabase first; null = not configured / failed / no shop -> localStorage fallback.
-      const [remoteTires, remoteSales, remoteInventory, remoteDeliveries] =
-        await Promise.all([
-          loadTable("tires"),
-          loadTable("sales"),
-          loadTable("inventory"),
-          loadTable("deliveries"),
-        ]);
-      const localTires = safeParse("tires", []);
-      const localSales = safeParse("sales", []);
-      setTires(remoteTires !== null ? remoteTires : localTires);
-      setSales(remoteSales !== null ? remoteSales : localSales);
-      setHotelTires(safeParse("hotelTires", []));
-      setInventory(
-        remoteInventory !== null ? remoteInventory : safeParse("inventory", [])
-      );
-      setDeliveries(
-        remoteDeliveries !== null ? remoteDeliveries : safeParse("deliveries", [])
-      );
-      // Diagnostic: cloud reachable but returned zero rows while this browser
-      // previously cached rows -> almost always wrong shop or RLS/filtering,
-      // NOT deleted data. Point at shop + docs instead of silently wiping.
-      if (
-        isSupabaseConfigured() &&
-        shop?.id &&
-        remoteTires !== null &&
-        remoteTires.length === 0 &&
-        localTires.length > 0
-      ) {
-        setStorageWarning(
-          `Showing 0 tires for shop "${shop?.name || shop.id}". This browser previously cached ${localTires.length} tire(s) — you may be in the wrong shop, or rows belong to another shop_id / are hidden by access rules. Your Supabase rows are NOT deleted. See docs/PRODUCTION.md or check blackwheel_shop_id in browser storage.`
-        );
-      }
-      loadedRef.current = true;
-    };
-
     loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shop?.id]);
+
+  const handleSyncUpload = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    try {
+      const res = await syncLocalToCloud();
+      if (!res || !res.ok) {
+        setStorageWarning(
+          res && res.error
+            ? `Upload failed: ${res.error}`
+            : "Upload failed. Check your connection and shop, then retry."
+        );
+      } else if (res.totalFailed > 0) {
+        setStorageWarning(
+          `Uploaded ${res.totalUploaded} record(s); ${res.totalFailed} failed (see console). ${res.totalSkipped} already in the cloud were skipped.`
+        );
+      } else {
+        setStorageWarning("");
+        setPendingUpload(null);
+      }
+      await loadData();
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   useEffect(() => {
     if (!loadedRef.current) return;
@@ -1388,6 +1440,23 @@ const App = () => {
                 >
                   <Typography variant="body2" color="textSecondary">
                     {storageWarning}{" "}
+                    {pendingUpload && (
+                      <Button
+                        size="small"
+                        variant="contained"
+                        disableElevation
+                        disabled={syncing}
+                        onClick={handleSyncUpload}
+                        sx={{ ml: 1, mr: 1, textTransform: "none", fontWeight: 700 }}
+                      >
+                        {syncing
+                          ? "Uploading…"
+                          : `Upload ${Object.values(pendingUpload).reduce(
+                              (n, v) => n + (Number(v) || 0),
+                              0
+                            )} local records to cloud`}
+                      </Button>
+                    )}
                     <span
                       style={{ textDecoration: "underline", cursor: "pointer" }}
                       onClick={() => setStorageWarning("")}

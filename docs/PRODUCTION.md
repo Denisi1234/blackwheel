@@ -67,6 +67,7 @@ This is filtering, not deletion. Check in order:
 3. **Inactive profile / email mismatch.** `select id, email, shop_id, role, active from profiles where lower(email) = lower('<login-email>');` — needs `active = true` and the right `shop_id`. Re-invites create a second profile row; strongest role wins per shop.
 4. **No-shop loads no longer wipe cache.** `loadTable` returns `null` (local fallback) when no shop is selected instead of `[]`. The app also warns in the UI when cloud returns 0 tires but the browser cache had rows.
 5. **Browser vs device.** Offline mode lives in `localStorage` per browser. Different device/incognito = empty until Supabase sync. Export JSON backup from Settings before switching devices.
+6. **Local-only rows never uploaded.** Records created before a shop was selected (or while cloud writes failed) live only in that browser. The app now keeps them on screen with a warning banner instead of wiping them — click **Upload N local records to cloud** (or Settings → **Sync Local Data to Cloud**) on the device that holds the data, then refresh other devices.
 
 ## 7. Ops notes / known limits
 

@@ -1,4 +1,4 @@
-import { newId, isUuid, isSupabaseConfigured } from "./store";
+import { newId, isUuid, isSupabaseConfigured, selectPendingUploads, sanitizeSyncRow, SYNC_KEYS_ORDER } from "./store";
 
 test("newId generates unique string ids", () => {
   const a = newId();
@@ -21,4 +21,61 @@ test("isUuid rejects legacy numeric ids", () => {
 test("supabase not configured with placeholder env", () => {
   // .env.example placeholders must never count as configured.
   expect(isSupabaseConfigured()).toBe(false);
+});
+
+test("selectPendingUploads skips ids already in the cloud", () => {
+  const local = [{ id: "a" }, { id: "b" }, { id: "c" }, { name: "no-id" }, null];
+  const remote = new Set(["a", "c"]);
+  const pending = selectPendingUploads(local, remote);
+  expect(pending).toEqual([{ id: "b" }, { name: "no-id" }]);
+});
+
+test("selectPendingUploads tolerates non-array input", () => {
+  expect(selectPendingUploads(null, new Set())).toEqual([]);
+  expect(selectPendingUploads(undefined)).toEqual([]);
+});
+
+test("sanitizeSyncRow keeps known uuid FK references", () => {
+  const tire = "123e4567-e89b-12d3-a456-426614174000";
+  const { row, skip } = sanitizeSyncRow(
+    "sales",
+    { id: "x", tireId: tire },
+    { tires: new Set([tire]) }
+  );
+  expect(skip).toBe(false);
+  expect(row.tireId).toBe(tire);
+});
+
+test("sanitizeSyncRow strips unknown and legacy FK references", () => {
+  const unknown = "123e4567-e89b-12d3-a456-426614174000";
+  const r1 = sanitizeSyncRow("sales", { id: "x", tireId: unknown }, { tires: new Set() });
+  expect(r1.skip).toBe(false);
+  expect(r1.row.tireId).toBeUndefined();
+  const r2 = sanitizeSyncRow("deliveries", { id: "y", tire_id: "1729000000000" }, { tires: new Set() });
+  expect(r2.skip).toBe(false);
+  expect(r2.row.tire_id).toBeUndefined();
+});
+
+test("sanitizeSyncRow skips rows with unknown NOT NULL FK parents", () => {
+  const unknown = "123e4567-e89b-12d3-a456-426614174000";
+  const r1 = sanitizeSyncRow("services", { id: "s", vehicleId: unknown }, { vehicles: new Set() });
+  expect(r1.skip).toBe(true);
+  const r2 = sanitizeSyncRow("transactions", { id: "t", account_id: unknown }, { accounts: new Set() });
+  expect(r2.skip).toBe(true);
+});
+
+test("sync order lists parents before children", () => {
+  const before = (parent, child) => {
+    expect(SYNC_KEYS_ORDER.indexOf(parent)).toBeGreaterThanOrEqual(0);
+    expect(SYNC_KEYS_ORDER.indexOf(child)).toBeGreaterThanOrEqual(0);
+    expect(SYNC_KEYS_ORDER.indexOf(parent)).toBeLessThan(SYNC_KEYS_ORDER.indexOf(child));
+  };
+  before("tires", "sales");
+  before("tires", "inventory");
+  before("tires", "deliveries");
+  before("hotelCustomers", "hotelTires");
+  before("vehicles", "services");
+  before("workers", "tasks");
+  before("accounts", "transactions");
+  before("accounts", "invoices");
 });
