@@ -134,6 +134,35 @@ export async function createShop(authUser, shopName, displayName) {
   return { shop, membership: toMembership({ ...profile, shop_id: shop.id, shop_name: shop.name }) };
 }
 
+// Default shop name for automatic provisioning: every account IS a shop.
+// Pure (unit-tested) so signup can name the shop without a round-trip.
+export function personalShopName(displayName, email) {
+  let base = String(displayName || "").trim();
+  if (!base && email) base = String(email).split("@")[0].trim();
+  if (!base || base.toLowerCase() === "my") return "My Tire Shop";
+  // Don't double-suffix ("Menis Shop" stays as-is).
+  let name =
+    /shop|store|duka|tire|garage|magari/i.test(base) ? base : `${base}'s Shop`;
+  // Must pass createShop's demo-name guard below.
+  if (["blackwheel", "demo", "test", "my shop", "shop"].includes(name.toLowerCase())) {
+    name = `${base} Tire Shop`;
+  }
+  return name.slice(0, 60);
+}
+
+// Create the account's own shop (creator becomes Admin). Used automatically
+// at first login so new users never face a manual shop-creation step.
+export async function ensurePersonalShop(authUser, displayName) {
+  if (!isSupabaseConfigured()) throw new Error("Shop creation needs Supabase.");
+  if (!authUser) throw new Error("Login required.");
+  const { membership } = await createShop(
+    authUser,
+    personalShopName(displayName, authUser.email),
+    displayName || personalShopName(displayName, authUser.email)
+  );
+  return membership;
+}
+
 export function enterShop(membership) {
   if (membership) setCurrentShopId(membership.shopId);
   return membership || null;

@@ -1,4 +1,4 @@
-import { TEAM_ROLES, INVITE_ROLES, getWorkerPermissions, isInviteRole } from "./team";
+import { TEAM_ROLES, INVITE_ROLES, getWorkerPermissions, isInviteRole, personalShopName } from "./team";
 
 test("team roles include all four, invites exclude Admin", () => {
   expect(TEAM_ROLES).toEqual(expect.arrayContaining(["Admin", "Technician", "Sales", "Staff"]));
@@ -38,4 +38,29 @@ test("offline mode is admin (full access)", () => {
   expect(p.isAdmin).toBe(true);
   expect(p.canManageWorkers).toBe(true);
   expect(p.readOnly).toBe(false);
+});
+
+test("personal shop name derives from display name", () => {
+  expect(personalShopName("Menis", "menis@example.com")).toBe("Menis's Shop");
+});
+
+test("personal shop name falls back to email prefix", () => {
+  expect(personalShopName("", "menis@example.com")).toBe("menis's Shop");
+  expect(personalShopName("", "shopowner@example.com")).toBe("shopowner");
+  expect(personalShopName(null, null)).toBe("My Tire Shop");
+});
+
+test("personal shop name keeps existing shop-like names", () => {
+  expect(personalShopName("Menis Tire Shop", "x@y.com")).toBe("Menis Tire Shop");
+});
+
+test("personal shop name passes the demo-name guard", () => {
+  for (const base of ["demo", "test", "shop", "blackwheel"]) {
+    const name = personalShopName(base, `${base}@x.com`).toLowerCase();
+    expect(["blackwheel", "demo", "test", "my shop", "shop"]).not.toContain(name);
+  }
+});
+
+test("personal shop name is capped at 60 chars", () => {
+  expect(personalShopName("A".repeat(100), "x@y.com").length).toBeLessThanOrEqual(60);
 });

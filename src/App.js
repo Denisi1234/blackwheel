@@ -66,6 +66,7 @@ import {
 import {
   resolveShopMemberships,
   enterShop,
+  ensurePersonalShop,
 } from "./lib/team";
 import Dashboard from "./components/Dashboard";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -225,6 +226,43 @@ const App = () => {
     return full;
   };
 
+  // One account IS one shop: a shop-less login auto-provisions a personal
+  // shop, so registration stays plain name/email/password with no shop
+  // typing. Invited users (existing memberships) keep their flow untouched.
+  // ShopGate remains only for multi-shop choice and provisioning failures.
+  const provisioningRef = useRef({});
+  const autoProvisionShop = async (baseUser, memberships) => {
+    const list = memberships || [];
+    if (list.length > 0) return enterMemberships(baseUser, list);
+    const uid = baseUser && baseUser.id;
+    if (uid && provisioningRef.current[uid]) {
+      // A parallel session restore is already creating the shop — wait for
+      // it, then re-resolve instead of creating a second shop.
+      try {
+        await provisioningRef.current[uid];
+      } catch (e) {
+        // fall through to re-resolve below
+      }
+      try {
+        const r = await resolveShopMemberships({ id: baseUser.id, email: baseUser.email });
+        return enterMemberships(baseUser, (r && r.memberships) || []);
+      } catch (e) {
+        return enterMemberships(baseUser, []);
+      }
+    }
+    const p = ensurePersonalShop(baseUser, baseUser && baseUser.name);
+    if (uid) provisioningRef.current[uid] = p;
+    try {
+      const membership = await p;
+      return enterMemberships(baseUser, [membership]);
+    } catch (e) {
+      console.warn("Auto shop provisioning failed, showing ShopGate:", (e && e.message) || e);
+      return enterMemberships(baseUser, []);
+    } finally {
+      if (uid) delete provisioningRef.current[uid];
+    }
+  };
+
   const resolveAndEnter = async (baseUser) => {
     if (!isSupabaseConfigured() || !baseUser) {
       if (baseUser) setUser(baseUser);
@@ -252,7 +290,7 @@ const App = () => {
         setCurrentShopId("");
         return null;
       }
-      return enterMemberships(baseUser, (resolved && resolved.memberships) || []);
+      return autoProvisionShop(baseUser, (resolved && resolved.memberships) || []);
     } catch (e) {
       setUser(baseUser);
       return baseUser;
@@ -1241,8 +1279,9 @@ const App = () => {
             onLoginSuccess={(u) => {
               if (!u) return;
               if (isSupabaseConfigured()) {
-                // Memberships already resolved by AuthModal; enter silently or gate.
-                enterMemberships(u, u.memberships || []);
+                // Memberships already resolved by AuthModal; shop-less users
+                // get a personal shop automatically (no shop typing).
+                autoProvisionShop(u, u.memberships || []);
               } else {
                 setUser(u);
                 try {
@@ -1259,7 +1298,8 @@ const App = () => {
     );
   }
 
-  // Cloud mode with no active shop: create, join or switch (multi-tenant gate).
+  // Fallback gate: only reached when auto-provisioning failed or the user
+  // belongs to several shops and must pick one. Normal users never see this.
   if (isSupabaseConfigured() && !shop) {
     return (
       <ThemeProvider theme={theme}>
