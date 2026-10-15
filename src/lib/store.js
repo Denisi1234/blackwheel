@@ -53,6 +53,8 @@ const TABLE_MAP = {
   profiles: "profiles",
   shops: "shops",
   auditLog: "audit_log",
+  taskComments: "task_comments",
+  notifications: "notifications",
 };
 
 // Tables that belong to exactly one shop. `shops` itself and `profiles`
@@ -74,6 +76,8 @@ const TENANT_TABLES = new Set([
   "tasks",
   "appointments",
   "audit_log",
+  "task_comments",
+  "notifications",
 ]);
 
 // Active shop id lives in memory only (never in browser storage): a refresh
@@ -127,6 +131,12 @@ export function auditSummary(table, row) {
   }
   if (table === "tasks" || table === "appointments" || table === "services") {
     return s(r.task || r.service || r.work_done || r.workDone) || `${table} ${s(r.id).slice(0, 8)}`;
+  }
+  if (table === "task_comments") {
+    return s(r.message).slice(0, 80) || `reply ${s(r.id).slice(0, 8)}`;
+  }
+  if (table === "notifications") {
+    return s(r.title || r.body).slice(0, 80) || `${s(r.type) || "notice"} ${s(r.id).slice(0, 8)}`;
   }
   if (table === "accounts") {
     return s(r.name) || `account ${s(r.id).slice(0, 8)}`;
@@ -369,6 +379,11 @@ function mapRowForSupabase(table, row) {
       out.status = TASK_STATUS_TO_DB[out.status] || "Devam Ediyor";
     }
   }
+  if (table === "task_comments" || table === "notifications") {
+    if (out.taskId !== undefined && out.task_id === undefined) out.task_id = out.taskId;
+    delete out.taskId;
+    if (out.task_id === "") delete out.task_id;
+  }
   if (table === "appointments") {
     if (out.customerName !== undefined && out.customer_name === undefined)
       out.customer_name = out.customerName;
@@ -519,6 +534,9 @@ function mapRowFromSupabase(table, row) {
     }
     if (out.status !== undefined && TASK_STATUS_FROM_DB[out.status])
       out.status = TASK_STATUS_FROM_DB[out.status];
+  }
+  if (table === "task_comments" || table === "notifications") {
+    if (out.task_id !== undefined && out.taskId === undefined) out.taskId = out.task_id;
   }
   if (table === "appointments") {
     if (out.customer_name !== undefined && out.customerName === undefined)

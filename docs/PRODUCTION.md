@@ -76,7 +76,8 @@ There is no browser cache, so "lost" data is always one of these:
 - Bundle: `main ~323 kB` gzipped after code-splitting; heavy screens lazy-load with `ErrorBoundary` retry (`App.js`, `ErrorBoundary.js`).
 - Roles are coarse by design (DB allows member writes; destructive UI gated). `Sales` has no distinct write rights. Add `profiles`-checked RLS migration if per-role DB enforcement is needed.
 - Failed cloud saves are visible: any rejected insert/update/delete shows a red toast naming the table and reason (e.g. unknown column), instead of looking saved until refresh.
-- Audit log: every successful cloud mutation records actor/action/table/row in `audit_log` (Admin → Audit Log screen, live + CSV export). No auto-purge — add retention if volume grows.
+ - Audit log: every successful cloud mutation records actor/action/table/row in `audit_log` (Admin → Audit Log screen, live + CSV export). No auto-purge — add retention if volume grows.
+ - Task replies + notifications: per-task reply thread (`task_comments`, any member can reply even read-only) with live inbox (`notifications`, bell in Worker Tracking, unread badge, click to open thread). Assignment and replies also email the assignee via EmailJS when `REACT_APP_EMAILJS_*` is set — best-effort, never blocks the UI.
 - Backups: Supabase PITR / scheduled database backups — the app holds no browser data, so there is nothing local to export for DR.
 - Emails (appointment reminders) require `REACT_APP_EMAILJS_*`; otherwise UI shows "not configured".
 - B2B / Virtual POS / E-Invoice / mobile app are not implemented (README Upcoming).

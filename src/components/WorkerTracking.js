@@ -33,6 +33,11 @@ import {
   LinearProgress,
   Divider,
   InputAdornment,
+  Badge,
+  Popover,
+  List,
+  ListItem,
+  ListItemText,
 } from "@mui/material";
 import {
   Add,
@@ -45,6 +50,9 @@ import {
   Download,
   Person,
   Assignment,
+  Forum,
+  Notifications,
+  Send,
 } from "@mui/icons-material";
 import { AdapterDateFns } from "@mui/x-date-pickers/AdapterDateFns";
 import { LocalizationProvider, DatePicker, TimePicker } from "@mui/x-date-pickers";
@@ -55,6 +63,7 @@ import SuccessModal from "./SuccessModal";
 import { downloadCsv, datedName, paintHeader, paintFooter, moneyTable, fmtDate } from "../lib/documents";
 import { loadTable, insertRow, updateRow, deleteRow, newId, isUuid, isSupabaseConfigured, subscribeTable, mergeUpsert, mergeRemove } from "../lib/store";
 import { getWorkerPermissions, sameEmail } from "../lib/team";
+import { buildTaskAssignedNotification, buildTaskReplyNotification, sendTaskEmail } from "../lib/notify";
 
 const TASK_TYPES = ["Removal", "Fitting", "Repair", "Maintenance", "Inspection"];
 const STATUSES = ["In Progress", "Completed", "Cancelled"];
@@ -148,18 +157,34 @@ const WorkerTracking = ({ user = null, shop = null }) => {
   const [rowsPerPage, setRowsPerPage] = useState(10);
   const [snackbar, setSnackbar] = useState({ open: false, message: "", severity: "success" });
   const [successModal, setSuccessModal] = useState({ open: false, title: "", message: "", details: [] });
+  // Replies thread + inbox notifications (professional task comms).
+  const [comments, setComments] = useState([]);
+  const [notifs, setNotifs] = useState([]);
+  const [threadTaskId, setThreadTaskId] = useState(null);
+  const [replyText, setReplyText] = useState("");
+  const [sendingReply, setSendingReply] = useState(false);
+  const [notifAnchor, setNotifAnchor] = useState(null);
   const loadedRef = useRef(false);
 
   const showSnackbar = (message, severity = "success") => setSnackbar({ open: true, message, severity });
+  const meEmail = String(user?.email || "").trim().toLowerCase();
+  const meName = String(user?.name || meEmail.split("@")[0] || "Team member");
 
   // ---- Load: pure cloud ----
   useEffect(() => {
     const loadAll = async () => {
       try {
-        const [remoteWorkers, remoteTasks] = await Promise.all([loadTable("workers"), loadTable("tasks")]);
+        const [remoteWorkers, remoteTasks, remoteComments, remoteNotifs] = await Promise.all([
+          loadTable("workers"),
+          loadTable("tasks"),
+          loadTable("taskComments").catch(() => []),
+          loadTable("notifications").catch(() => []),
+        ]);
         if (remoteWorkers !== null && remoteTasks !== null) {
           setWorkers(Array.isArray(remoteWorkers) ? remoteWorkers : []);
           setTasks(Array.isArray(remoteTasks) ? remoteTasks : []);
+          setComments(Array.isArray(remoteComments) ? remoteComments : []);
+          setNotifs(Array.isArray(remoteNotifs) ? remoteNotifs : []);
         } else {
           setWorkers([]);
           setTasks([]);
@@ -174,11 +199,13 @@ const WorkerTracking = ({ user = null, shop = null }) => {
     loadAll();
   }, []);
 
-  // Realtime: worker/task changes on other devices merge in live.
+  // Realtime: worker/task/comment/notification changes merge in live.
   useEffect(() => {
     const offs = [
       ["workers", setWorkers],
       ["tasks", setTasks],
+      ["taskComments", setComments],
+      ["notifications", setNotifs],
     ].map(([key, set]) =>
       subscribeTable(key, {
         onInsert: (r) => set((p) => mergeUpsert(p, r)),
@@ -198,6 +225,113 @@ const WorkerTracking = ({ user = null, shop = null }) => {
   }, []);
 
   const workerById = (id) => (workers || []).find((w) => String(w?.id) === String(id));
+  const taskById = (id) => (tasks || []).find((t) => String(t?.id) === String(id));
+
+  // Replies grouped per task (oldest first) + personal inbox (newest first).
+  const commentsByTask = useMemo(() => {
+    const m = new Map();
+    (comments || []).forEach((c) => {
+      const tid = String(c?.taskId || c?.task_id || "");
+      if (!tid) return;
+      if (!m.has(tid)) m.set(tid, []);
+      m.get(tid).push(c);
+    });
+    m.forEach((list) => list.sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || ""))));
+    return m;
+  }, [comments]);
+
+  const myNotifs = useMemo(() => {
+    if (!meEmail) return [];
+    return (notifs || [])
+      .filter((n) => String(n?.user_email || "").trim().toLowerCase() === meEmail)
+      .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+  }, [notifs, meEmail]);
+  const unreadCount = myNotifs.filter((n) => !n.read).length;
+  const threadTask = threadTaskId ? taskById(threadTaskId) : null;
+  const threadComments = threadTaskId ? commentsByTask.get(String(threadTaskId)) || [] : [];
+
+  // Fire-and-forget inbox + email for a new assignment. Never blocks the UI.
+  const notifyAssignee = (task, worker) => {
+    try {
+      const row = buildTaskAssignedNotification({ task, worker, author: { name: meName, email: meEmail } });
+      if (row) insertRow("notifications", row);
+      const email = String(worker?.email || "").trim();
+      if (email) {
+        sendTaskEmail({
+          toEmail: email,
+          subject: `New task assigned: ${task?.task || "Task"}`,
+          message: `Hi ${worker?.name || ""},\n\nYou were assigned "${task?.task || "a task"}"${task?.date ? ` on ${task.date}` : ""}${task?.time ? ` at ${String(task.time).slice(0, 5)}` : ""}.\nDetails: ${task?.details || "-"}\n\nOpen Worker Tracking → My tasks to reply.`,
+          task,
+          worker,
+          shopName: shop?.name || "",
+        });
+      }
+    } catch (e) {
+      // notify must never break assignment
+    }
+  };
+
+  // Any shop member can reply (even read-only roles) — replying is
+  // communication, not task mutation. Notifies assignee + prior commenters.
+  const sendReply = async () => {
+    const text = replyText.trim();
+    if (!text || !threadTask || sendingReply) return;
+    setSendingReply(true);
+    try {
+      const rec = {
+        id: newId(),
+        taskId: String(threadTask.id),
+        author_email: meEmail,
+        author_name: meName,
+      };
+      if (user?.id && isUuid(user.id)) rec.author_id = user.id;
+      const saved = await insertRow("taskComments", { ...rec, message: text });
+      setComments((prev) => mergeUpsert(prev || [], saved || { ...rec, message: text, created_at: new Date().toISOString() }));
+      setReplyText("");
+      // Recipients: assignee + everyone who replied before, minus self.
+      const emails = new Set();
+      const assigneeEmail = String(workerById(threadTask.workerId)?.email || "").trim().toLowerCase();
+      if (assigneeEmail) emails.add(assigneeEmail);
+      (threadComments || []).forEach((c) => {
+        const e = String(c?.author_email || "").trim().toLowerCase();
+        if (e) emails.add(e);
+      });
+      emails.delete(meEmail);
+      for (const to of emails) {
+        const row = buildTaskReplyNotification({
+          task: threadTask,
+          worker: workerById(threadTask.workerId),
+          recipientEmail: to,
+          author: { name: meName, email: meEmail },
+        });
+        if (row) insertRow("notifications", row);
+      }
+      if (assigneeEmail && assigneeEmail !== meEmail) {
+        sendTaskEmail({
+          toEmail: assigneeEmail,
+          subject: `Reply on task: ${threadTask.task}`,
+          message: `${meName} replied on "${threadTask.task}":\n\n${text}\n\nOpen Worker Tracking to view and reply.`,
+          task: threadTask,
+          worker: workerById(threadTask.workerId),
+          shopName: shop?.name || "",
+        });
+      }
+    } finally {
+      setSendingReply(false);
+    }
+  };
+
+  const markNotifRead = (id) => {
+    setNotifs((prev) => (prev || []).map((n) => (String(n?.id) === String(id) ? { ...n, read: true } : n)));
+    updateRow("notifications", id, { read: true });
+  };
+
+  const markAllNotifsRead = () => {
+    const unread = myNotifs.filter((n) => !n.read);
+    if (unread.length === 0) return;
+    setNotifs((prev) => (prev || []).map((n) => (String(n?.user_email || "").toLowerCase() === meEmail ? { ...n, read: true } : n)));
+    unread.forEach((n) => updateRow("notifications", n.id, { read: true }));
+  };
 
   const getWorkerStats = (workerId) => {
     const list = (tasks || []).filter((t) => String(t?.workerId) === String(workerId));
@@ -455,6 +589,7 @@ const WorkerTracking = ({ user = null, shop = null }) => {
       setTasks((prev) => [...(prev || []), rec]);
       if (isUuid(taskForm.workerId) && isUuid(rec.id)) insertRow("tasks", rec);
       showSnackbar("Task assigned.", "success");
+      notifyAssignee(rec, workerById(rec.workerId));
       setSuccessModal({
         open: true,
         title: "Task Assigned",
@@ -537,12 +672,19 @@ const WorkerTracking = ({ user = null, shop = null }) => {
             <Assignment /> Worker Tracking <Chip size="small" label={role} variant="outlined" sx={{ ml: 1 }} />
           </Typography>
           <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+            <Tooltip title={unreadCount > 0 ? `${unreadCount} unread notification(s)` : "Notifications"}>
+              <IconButton size="small" onClick={(e) => setNotifAnchor(e.currentTarget)}>
+                <Badge badgeContent={unreadCount} color="error">
+                  <Notifications fontSize="small" />
+                </Badge>
+              </IconButton>
+            </Tooltip>
             {canManageWorkers && (<Button variant="contained" startIcon={<Add />} onClick={openAddWorker}>Add Worker</Button>)}
             {canAssignTasks && (<Button variant="outlined" startIcon={<Add />} onClick={() => openAddTask()} disabled={(workers || []).length === 0}>Assign Task</Button>)}
           </Box>
         </Box>
         {readOnly && (
-          <Alert severity="info" sx={{ mb: 2 }}>Read-only: your role ({role}) can view and export tasks. Only Admin can manage workers/deletes, Admin/Technician can update tasks.</Alert>
+          <Alert severity="info" sx={{ mb: 2 }}>Read-only: your role ({role}) can view and export tasks and reply to your tasks. Only Admin can manage workers/deletes, Admin/Technician can update tasks.</Alert>
         )}
 
         <Grid container spacing={2} sx={{ mb: 2 }}>
@@ -700,6 +842,16 @@ const WorkerTracking = ({ user = null, shop = null }) => {
                     <TableCell><Chip size="small" color={statusColor(t.status)} label={t.status} /></TableCell>
                     <TableCell sx={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.details || "-"}</TableCell>
                     <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>
+                      <Tooltip title="Replies">
+                        <IconButton
+                          size="small"
+                          onClick={() => { setThreadTaskId(String(t.id)); setReplyText(""); }}
+                        >
+                          <Badge badgeContent={(commentsByTask.get(String(t.id)) || []).length} color="primary" max={99}>
+                            <Forum fontSize="small" />
+                          </Badge>
+                        </IconButton>
+                      </Tooltip>
                       {canChangeStatus && t.status !== "Completed" && (
                         <Tooltip title="Mark completed"><IconButton size="small" color="success" onClick={() => setTaskStatus(t.id, "Completed")}><CheckCircle fontSize="small" /></IconButton></Tooltip>
                       )}
@@ -791,6 +943,128 @@ const WorkerTracking = ({ user = null, shop = null }) => {
             <Button variant="contained" onClick={saveTask}>{editingTask ? "Save" : "Assign"}</Button>
           </DialogActions>
         </Dialog>
+
+        {/* Replies thread: assignee and team discuss the task here */}
+        <Dialog open={!!threadTask} onClose={() => setThreadTaskId(null)} maxWidth="sm" fullWidth>
+          <DialogTitle>
+            Replies — {threadTask?.task || "Task"}
+            <Typography variant="body2" color="text.secondary">
+              {workerById(threadTask?.workerId)?.name || ""}{threadTask?.date ? ` · ${fmtDate(threadTask.date) || threadTask.date}` : ""}{threadTask?.time ? ` ${String(threadTask.time).slice(0, 5)}` : ""} · {threadTask?.status || ""}
+            </Typography>
+          </DialogTitle>
+          <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
+            {threadTask?.details && (
+              <Paper variant="outlined" sx={{ p: 1.5, bgcolor: "action.hover" }}>
+                <Typography variant="caption" color="text.secondary">Task details</Typography>
+                <Typography variant="body2">{threadTask.details}</Typography>
+              </Paper>
+            )}
+            {threadComments.length === 0 ? (
+              <Typography variant="body2" color="text.secondary" sx={{ py: 2, textAlign: "center" }}>
+                No replies yet — start the conversation below. The assignee is notified instantly.
+              </Typography>
+            ) : (
+              <List dense sx={{ maxHeight: 320, overflowY: "auto" }}>
+                {threadComments.map((c) => (
+                  <ListItem key={String(c.id)} alignItems="flex-start" sx={{ px: 0 }}>
+                    <Avatar sx={{ width: 32, height: 32, mr: 1.5, mt: 0.5 }}>
+                      {String(c.author_name || c.author_email || "?").charAt(0).toUpperCase()}
+                    </Avatar>
+                    <ListItemText
+                      primary={
+                        <Box sx={{ display: "flex", gap: 1, alignItems: "baseline", flexWrap: "wrap" }}>
+                          <Typography variant="body2" fontWeight={700}>{c.author_name || c.author_email || "Team"}</Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            {c.created_at ? new Date(c.created_at).toLocaleString() : ""}
+                          </Typography>
+                        </Box>
+                      }
+                      secondary={<Typography variant="body2" color="text.primary">{c.message}</Typography>}
+                    />
+                  </ListItem>
+                ))}
+              </List>
+            )}
+            <Box sx={{ display: "flex", gap: 1, mt: 1 }}>
+              <TextField
+                fullWidth
+                size="small"
+                label={`Reply as ${meName}`}
+                value={replyText}
+                onChange={(e) => setReplyText(e.target.value)}
+                multiline
+                rows={2}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) sendReply();
+                }}
+              />
+              <Button variant="contained" startIcon={<Send />} onClick={sendReply} disabled={!replyText.trim() || sendingReply} sx={{ alignSelf: "flex-end" }}>
+                Send
+              </Button>
+            </Box>
+            <Typography variant="caption" color="text.secondary">Ctrl+Enter to send. Everyone on this task is notified.</Typography>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setThreadTaskId(null)}>Close</Button>
+          </DialogActions>
+        </Dialog>
+
+        {/* Inbox: assignments + replies addressed to me */}
+        <Popover
+          open={Boolean(notifAnchor)}
+          anchorEl={notifAnchor}
+          onClose={() => setNotifAnchor(null)}
+          anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+          transformOrigin={{ vertical: "top", horizontal: "right" }}
+        >
+          <Box sx={{ width: 360, maxWidth: "90vw", p: 1 }}>
+            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", px: 1, py: 0.5 }}>
+              <Typography variant="subtitle2" fontWeight={700}>Notifications{unreadCount > 0 ? ` (${unreadCount} unread)` : ""}</Typography>
+              {unreadCount > 0 && (<Button size="small" onClick={markAllNotifsRead}>Mark all read</Button>)}
+            </Box>
+            {myNotifs.length === 0 ? (
+              <Typography variant="body2" color="text.secondary" sx={{ p: 2, textAlign: "center" }}>
+                No notifications. New tasks and replies addressed to {meEmail || "you"} appear here instantly.
+              </Typography>
+            ) : (
+              <List dense sx={{ maxHeight: 380, overflowY: "auto" }}>
+                {myNotifs.slice(0, 30).map((n) => (
+                  <ListItem
+                    key={String(n.id)}
+                    alignItems="flex-start"
+                    button
+                    onClick={() => {
+                      markNotifRead(n.id);
+                      if (n.taskId || n.task_id) {
+                        const tid = String(n.taskId || n.task_id);
+                        if (taskById(tid)) {
+                          setThreadTaskId(tid);
+                          setReplyText("");
+                        }
+                      }
+                      setNotifAnchor(null);
+                    }}
+                    sx={{ borderRadius: 1, bgcolor: n.read ? "transparent" : "action.hover", mb: 0.5 }}
+                  >
+                    <ListItemText
+                      primary={
+                        <Typography variant="body2" fontWeight={n.read ? 400 : 700}>{n.title || n.type}</Typography>
+                      }
+                      secondary={
+                        <>
+                          <Typography variant="body2" color="text.secondary">{n.body}</Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            {n.created_at ? new Date(n.created_at).toLocaleString() : ""}
+                          </Typography>
+                        </>
+                      }
+                    />
+                  </ListItem>
+                ))}
+              </List>
+            )}
+          </Box>
+        </Popover>
 
         {/* Delete confirms */}
         <Dialog open={!!confirmDeleteWorker} onClose={() => setConfirmDeleteWorker(null)} maxWidth="xs" fullWidth>
