@@ -331,9 +331,9 @@ function mapRowForSupabase(table, row) {
     if (out.loadIndex !== undefined && out.load_index === undefined) out.load_index = out.loadIndex;
     delete out.loadIndex;
     if (out.condition !== undefined && out.tire_condition === undefined) out.tire_condition = out.condition;
-    // `condition` is also a plain column name on some schemas; keep both keys
-    // and let the insert succeed on whichever exists by stripping unknowns on error? We send both.
-    // Keep `condition` as-is for forward-compat.
+    // The DB column is `tire_condition` only. A stray `condition` key makes
+    // PostgREST reject the entire insert/update, so it must not be sent.
+    delete out.condition;
     // Identity fields `sku` / `barcode` / `supplier` are already snake_case — they pass
     // through untouched in both directions.
   }
