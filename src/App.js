@@ -49,6 +49,7 @@ import DirectionsCarIcon from "@mui/icons-material/DirectionsCar";
 import PersonIcon from "@mui/icons-material/Person";
 import InventoryIcon from "@mui/icons-material/Inventory";
 import GroupIcon from "@mui/icons-material/Group";
+import HistoryIcon from "@mui/icons-material/History";
 import { supabase } from "./lib/supabaseClient";
 import CalendarTodayIcon from "@mui/icons-material/CalendarToday";
 import { getLowStockThreshold, getCurrency, loadShopSettings, resetSettingsMemory } from "./lib/settings";
@@ -66,6 +67,7 @@ import {
   subscribeTable,
   mergeUpsert,
   mergeRemove,
+  setAuditActor,
 } from "./lib/store";
 import {
   resolveShopMemberships,
@@ -90,6 +92,7 @@ const AppointmentSystem = lazy(() => import("./components/AppointmentSystem"));
 const Settings = lazy(() => import("./components/Settings"));
 const AuthModal = lazy(() => import("./components/AuthModal"));
 const TeamManagement = lazy(() => import("./components/TeamManagement"));
+const AuditLog = lazy(() => import("./components/AuditLog"));
 
 const drawerWidth = 240;
 
@@ -206,6 +209,7 @@ const App = () => {
       role: (chosen && chosen.role) || baseUser.role || "Staff",
     };
     setUser(full);
+    setAuditActor(baseUser);
     return full;
   };
 
@@ -258,6 +262,7 @@ const App = () => {
     setShop(null);
     setSelectedComponent("Dashboard");
     setCurrentShopId("");
+    setAuditActor(null);
     resetSettingsMemory();
     loadedRef.current = false;
   };
@@ -322,6 +327,7 @@ const App = () => {
     Deliveries: "Deliveries",
     Settings: "Settings",
     TeamManagement: "Team",
+    AuditLog: "Audit Log",
   }), []);
 
   // Global cloud-save failure toast: any rejected insert/update/delete
@@ -998,7 +1004,10 @@ const App = () => {
       group: "System",
       items: [
         ...(canSeeTeam
-          ? [{ text: "Team", icon: <GroupIcon />, component: "TeamManagement" }]
+          ? [
+              { text: "Team", icon: <GroupIcon />, component: "TeamManagement" },
+              { text: "Audit Log", icon: <HistoryIcon />, component: "AuditLog" },
+            ]
           : []),
         { text: "Settings", icon: <SettingsIcon />, component: "Settings" },
       ],
@@ -1132,6 +1141,8 @@ const App = () => {
         return (
           <TeamManagement shop={shop} currentUser={user} />
         );
+      case "AuditLog":
+        return <AuditLog user={user} shop={shop} />;
       default:
         return <Dashboard tires={tires} sales={sales} />;
     }

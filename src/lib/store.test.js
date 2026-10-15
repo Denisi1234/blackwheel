@@ -1,4 +1,4 @@
-import { newId, isUuid, isSupabaseConfigured, onSaveError, reportSaveError, insertRow, mergeUpsert, mergeRemove, subscribeTable } from "./store";
+import { newId, isUuid, isSupabaseConfigured, onSaveError, reportSaveError, insertRow, mergeUpsert, mergeRemove, subscribeTable, auditSummary, setAuditActor } from "./store";
 
 test("newId generates unique string ids", () => {
   const a = newId();
@@ -75,4 +75,21 @@ test("subscribeTable is a safe noop when unconfigured", () => {
   expect(typeof off).toBe("function");
   expect(() => off()).not.toThrow();
   expect(typeof subscribeTable("nope", {})).toBe("function");
+});
+
+test("auditSummary describes rows per table", () => {
+  expect(auditSummary("tires", { brand: "Michelin", size: "205/55R16", year: 2023 })).toBe("Michelin 205/55R16 2023");
+  expect(auditSummary("sales", { customerName: "John", quantity: 2 })).toBe("John ×2");
+  expect(auditSummary("workers", { email: "a@x.com" })).toBe("a@x.com");
+  expect(auditSummary("hotel_customers", { name: "Jane", email: "j@x.com" })).toBe("Jane");
+  expect(auditSummary("hotel_tires", { customerName: "Jane", plateNumber: "T123" })).toBe("Jane — T123");
+  expect(auditSummary("tires", null)).toBe("tire ");
+  expect(auditSummary("mystery", { id: "abc123" }).length).toBeGreaterThan(0);
+});
+
+test("setAuditActor tolerates junk", () => {
+  expect(() => setAuditActor(null)).not.toThrow();
+  expect(() => setAuditActor({})).not.toThrow();
+  expect(() => setAuditActor({ id: "u1", email: "a@x.com", name: "A" })).not.toThrow();
+  setAuditActor(null);
 });

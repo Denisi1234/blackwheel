@@ -52,6 +52,7 @@ const TABLE_MAP = {
   appointments: "appointments",
   profiles: "profiles",
   shops: "shops",
+  auditLog: "audit_log",
 };
 
 // Tables that belong to exactly one shop. `shops` itself and `profiles`
@@ -72,6 +73,7 @@ const TENANT_TABLES = new Set([
   "workers",
   "tasks",
   "appointments",
+  "audit_log",
 ]);
 
 // Active shop id lives in memory only (never in browser storage): a refresh
@@ -85,6 +87,91 @@ export function getCurrentShopId() {
 
 export function setCurrentShopId(id) {
   MEM_SHOP_ID = id || "";
+}
+
+// ---------- Audit log ----------
+// Who changed what: every successful cloud mutation below records actor,
+// action, table and row. Fire-and-forget, never blocks the UI, and never
+// audits itself (no recursion). The actor is set by App on login.
+let AUDIT_ACTOR = null;
+
+export function setAuditActor(actor) {
+  AUDIT_ACTOR =
+    actor && actor.id
+      ? {
+          id: String(actor.id),
+          email: String(actor.email || ""),
+          name: String(actor.name || ""),
+        }
+      : null;
+}
+
+// Short human summary per table for the audit trail. Pure (unit-tested).
+export function auditSummary(table, row) {
+  const r = row || {};
+  const s = (v) => String(v ?? "").trim();
+  if (table === "tires") {
+    return [r.brand, r.size, r.year].filter(Boolean).join(" ").slice(0, 80) || `tire ${s(r.id).slice(0, 8)}`;
+  }
+  if (table === "sales") {
+    return `${s(r.customerName || r.customer_name) || "sale"} ×${r.quantity ?? ""}`.slice(0, 80);
+  }
+  if (table === "hotel_tires") {
+    return [r.customerName || r.customer_name, r.plateNumber || r.plate_number].filter(Boolean).join(" — ").slice(0, 80);
+  }
+  if (table === "vehicles") {
+    return s(r.licensePlate || r.license_plate) || `vehicle ${s(r.id).slice(0, 8)}`;
+  }
+  if (table === "workers" || table === "profiles") {
+    return s(r.name || r.full_name || r.email) || `member ${s(r.id).slice(0, 8)}`;
+  }
+  if (table === "tasks" || table === "appointments" || table === "services") {
+    return s(r.task || r.service || r.work_done || r.workDone) || `${table} ${s(r.id).slice(0, 8)}`;
+  }
+  if (table === "accounts") {
+    return s(r.name) || `account ${s(r.id).slice(0, 8)}`;
+  }
+  if (table === "transactions" || table === "invoices") {
+    return s(r.description || r.number) || `${table} ${s(r.id).slice(0, 8)}`;
+  }
+  if (table === "hotel_customers") {
+    return s(r.name || r.email || r.phone) || `customer ${s(r.id).slice(0, 8)}`;
+  }
+  if (table === "shop_settings") {
+    return s(r.key || "settings") || `settings ${s(r.id).slice(0, 8)}`;
+  }
+  if (table === "deliveries" || table === "inventory") {
+    return `${table} ×${r.quantity ?? ""}`.slice(0, 80);
+  }
+  return `${table} ${s(r.id).slice(0, 8)}`.slice(0, 80);
+}
+
+function auditWrite(table, op, row) {
+  try {
+    if (!isSupabaseConfigured()) return;
+    if (table === "audit_log") return;
+    if (!AUDIT_ACTOR) return;
+    const shopId = getCurrentShopId();
+    if (!shopId) return;
+    const rowId = row && row.id !== undefined && row.id !== null ? String(row.id) : "";
+    supabase
+      .from("audit_log")
+      .insert({
+        shop_id: shopId,
+        actor_id: AUDIT_ACTOR.id,
+        actor_email: AUDIT_ACTOR.email,
+        actor_name: AUDIT_ACTOR.name,
+        action: op,
+        table_name: table,
+        row_id: rowId,
+        summary: auditSummary(table, row),
+      })
+      .then(({ error }) => {
+        if (error) console.warn("Audit write failed:", error.message);
+      });
+  } catch (e) {
+    // audit must never break the save path
+  }
 }
 
 // App invoice statuses <-> Postgres check constraint values.
@@ -602,7 +689,12 @@ export async function insertRow(key, row) {
       reportSaveError(table, "insert", error.message);
       return null;
     }
-    return data ? mapRowFromSupabase(table, data) : null;
+    if (data) {
+      const saved = mapRowFromSupabase(table, data);
+      auditWrite(table, "insert", saved);
+      return saved;
+    }
+    return null;
   } catch (e) {
     console.warn(`Supabase insert ${table} exception:`, e);
     reportSaveError(table, "insert", e);
@@ -634,7 +726,12 @@ export async function updateRow(key, id, patch) {
       reportSaveError(table, "update", error.message);
       return null;
     }
-    return data ? mapRowFromSupabase(table, data) : null;
+    if (data) {
+      const saved = mapRowFromSupabase(table, data);
+      auditWrite(table, "update", saved);
+      return saved;
+    }
+    return null;
   } catch (e) {
     console.warn(`Supabase update ${table} exception:`, e);
     reportSaveError(table, "update", e);
@@ -660,6 +757,7 @@ export async function deleteRow(key, id) {
       reportSaveError(table, "delete", error.message);
       return false;
     }
+    auditWrite(table, "delete", { id });
     return true;
   } catch (e) {
     console.warn(`Supabase delete ${table} exception:`, e);
@@ -689,6 +787,7 @@ export async function deleteRowsByTireId(key, tireId) {
       reportSaveError(table, "delete", error.message);
       return false;
     }
+    auditWrite(table, "delete", { id: tireId });
     return true;
   } catch (e) {
     console.warn(`Supabase delete-by-tire ${table} exception:`, e);
@@ -720,7 +819,12 @@ export async function upsertInventoryRow(tireId, quantity) {
       reportSaveError("inventory", "upsert", error.message);
       return null;
     }
-    return data ? mapRowFromSupabase("inventory", data) : null;
+    if (data) {
+      const saved = mapRowFromSupabase("inventory", data);
+      auditWrite("inventory", "upsert", saved);
+      return saved;
+    }
+    return null;
   } catch (e) {
     console.warn("Supabase upsert inventory exception:", e);
     reportSaveError("inventory", "upsert", e);
