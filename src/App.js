@@ -27,6 +27,8 @@ import {
   Badge,
   SwipeableDrawer,
   ListSubheader,
+  Snackbar,
+  Alert as MuiAlert,
 } from "@mui/material";
 import { styled } from "@mui/material/styles";
 import MenuIcon from "@mui/icons-material/Menu";
@@ -60,6 +62,7 @@ import {
   isSupabaseConfigured,
   getCurrentShopId,
   setCurrentShopId,
+  onSaveError,
 } from "./lib/store";
 import {
   resolveShopMemberships,
@@ -169,6 +172,7 @@ const App = () => {
   const [deliveries, setDeliveries] = useState([]);
   const [shop, setShop] = useState(null);
   const [shopError, setShopError] = useState("");
+  const [saveError, setSaveError] = useState(null);
   const loadedRef = useRef(false);
 
   // ---- Multi-tenant shop session --------------------------------------
@@ -316,6 +320,19 @@ const App = () => {
     Settings: "Settings",
     TeamManagement: "Team",
   }), []);
+
+  // Global cloud-save failure toast: any rejected insert/update/delete
+  // surfaces here, so a failed write is never mistaken for a saved one.
+  useEffect(() => {
+    return onSaveError((d) => {
+      const text = `Couldn't save ${d.op} (${d.table}): ${d.message}. Shown for now, but it won't survive refresh.`;
+      setSaveError((prev) =>
+        prev && prev.text === text
+          ? { ...prev, count: prev.count + 1, id: Date.now() }
+          : { id: Date.now(), text, count: 1 }
+      );
+    });
+  }, []);
 
   // Restore the Supabase Auth session on load. `restoring` covers the
   // async gap so refreshes never flash the login screen.
@@ -1177,6 +1194,18 @@ const App = () => {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
+      <Snackbar
+        open={Boolean(saveError)}
+        autoHideDuration={8000}
+        onClose={(_e, reason) => {
+          if (reason !== "clickaway") setSaveError(null);
+        }}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      >
+        <MuiAlert severity="error" variant="filled" onClose={() => setSaveError(null)} sx={{ width: "100%" }}>
+          {saveError ? `${saveError.text}${saveError.count > 1 ? ` (${saveError.count})` : ""}` : ""}
+        </MuiAlert>
+      </Snackbar>
       <Router>
         <Box sx={{ display: "flex" }}>
           <StyledAppBar position="fixed" open={open}>

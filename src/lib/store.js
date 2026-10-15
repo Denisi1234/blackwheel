@@ -553,6 +553,33 @@ export async function countTable(key) {
   }
 }
 
+// ---------- Visible save errors ----------
+// insert/update/delete used to fail silently (console.warn only) while the UI
+// already showed the change — data looked saved until refresh. Every cloud
+// mutation failure below is now also broadcast here; App.js subscribes and
+// shows it, so a rejected write is never mistaken for a saved one.
+const saveErrorListeners = new Set();
+
+export function onSaveError(fn) {
+  if (typeof fn !== "function") return () => {};
+  saveErrorListeners.add(fn);
+  return () => {
+    saveErrorListeners.delete(fn);
+  };
+}
+
+export function reportSaveError(table, op, message) {
+  if (saveErrorListeners.size === 0) return;
+  const detail = { table, op, message: String((message && message.message) || message || "unknown error") };
+  saveErrorListeners.forEach((fn) => {
+    try {
+      fn(detail);
+    } catch (e) {
+      // listener failures must never break the save path
+    }
+  });
+}
+
 export async function insertRow(key, row) {
   const table = TABLE_MAP[key];
   if (!table || !isSupabaseConfigured()) return null;
@@ -565,17 +592,20 @@ export async function insertRow(key, row) {
       // Never write orphan tenant rows — they would vanish under RLS.
       if (!payload.shop_id) {
         console.warn(`Supabase insert ${table} skipped: no shop selected.`);
+        reportSaveError(table, "insert", "no shop selected");
         return null;
       }
     }
     const { data, error } = await supabase.from(table).insert(payload).select().single();
     if (error) {
       console.warn(`Supabase insert ${table} failed:`, error.message);
+      reportSaveError(table, "insert", error.message);
       return null;
     }
     return data ? mapRowFromSupabase(table, data) : null;
   } catch (e) {
     console.warn(`Supabase insert ${table} exception:`, e);
+    reportSaveError(table, "insert", e);
     return null;
   }
 }
@@ -601,11 +631,13 @@ export async function updateRow(key, id, patch) {
     const { data, error } = await query.select().single();
     if (error) {
       console.warn(`Supabase update ${table} failed:`, error.message);
+      reportSaveError(table, "update", error.message);
       return null;
     }
     return data ? mapRowFromSupabase(table, data) : null;
   } catch (e) {
     console.warn(`Supabase update ${table} exception:`, e);
+    reportSaveError(table, "update", e);
     return null;
   }
 }
@@ -625,11 +657,13 @@ export async function deleteRow(key, id) {
     const { error } = await query;
     if (error) {
       console.warn(`Supabase delete ${table} failed:`, error.message);
+      reportSaveError(table, "delete", error.message);
       return false;
     }
     return true;
   } catch (e) {
     console.warn(`Supabase delete ${table} exception:`, e);
+    reportSaveError(table, "delete", e);
     return false;
   }
 }
@@ -652,11 +686,13 @@ export async function deleteRowsByTireId(key, tireId) {
     const { error } = await query;
     if (error) {
       console.warn(`Supabase delete-by-tire ${table} failed:`, error.message);
+      reportSaveError(table, "delete", error.message);
       return false;
     }
     return true;
   } catch (e) {
     console.warn(`Supabase delete-by-tire ${table} exception:`, e);
+    reportSaveError(table, "delete", e);
     return false;
   }
 }
@@ -681,11 +717,13 @@ export async function upsertInventoryRow(tireId, quantity) {
       .single();
     if (error) {
       console.warn("Supabase upsert inventory failed:", error.message);
+      reportSaveError("inventory", "upsert", error.message);
       return null;
     }
     return data ? mapRowFromSupabase("inventory", data) : null;
   } catch (e) {
     console.warn("Supabase upsert inventory exception:", e);
+    reportSaveError("inventory", "upsert", e);
     return null;
   }
 }
