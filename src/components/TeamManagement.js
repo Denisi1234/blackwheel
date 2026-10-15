@@ -37,6 +37,9 @@ import {
   deleteRow,
   newId,
   isSupabaseConfigured,
+  subscribeTable,
+  mergeUpsert,
+  mergeRemove,
 } from '../lib/store';
 import { TEAM_ROLES, INVITE_ROLES } from '../lib/team';
 import { getAppLang } from './i18n';
@@ -157,6 +160,29 @@ function TeamManagement({ shop = null, currentUser = null }) {
       }
     };
     loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shopId]);
+
+  // Realtime: team changes on other devices merge in live. Profiles arrive
+  // unfiltered (invites need cross-shop visibility), so only rows for this
+  // shop enter the list.
+  useEffect(() => {
+    const inShop = (r) => !shopId || String(r?.shopId) === String(shopId);
+    const off = subscribeTable('profiles', {
+      onInsert: (r) => {
+        if (inShop(r)) setProfiles((p) => mergeUpsert(p, r));
+      },
+      onUpdate: (r) =>
+        setProfiles((p) => (inShop(r) ? mergeUpsert(p, r) : mergeRemove(p, r.id))),
+      onDelete: (id) => setProfiles((p) => mergeRemove(p, id)),
+    });
+    return () => {
+      try {
+        off();
+      } catch (e) {
+        // ignore
+      }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shopId]);
 

@@ -67,6 +67,9 @@ import {
   updateRow,
   deleteRow,
   newId,
+  subscribeTable,
+  mergeUpsert,
+  mergeRemove,
 } from "../lib/store";
 
 const localizer = momentLocalizer(moment);
@@ -133,6 +136,22 @@ const AppointmentSystem = () => {
       }
     };
     loadAll();
+  }, []);
+
+  // Realtime: bookings made on other devices merge in live.
+  useEffect(() => {
+    const off = subscribeTable("appointments", {
+      onInsert: (r) => setAppointments((p) => mergeUpsert(p, r)),
+      onUpdate: (r) => setAppointments((p) => mergeUpsert(p, r)),
+      onDelete: (id) => setAppointments((p) => mergeRemove(p, id)),
+    });
+    return () => {
+      try {
+        off();
+      } catch (e) {
+        // ignore
+      }
+    };
   }, []);
 
   const handleInputChange = (e) => {

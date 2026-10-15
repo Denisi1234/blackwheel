@@ -747,3 +747,81 @@ export async function uploadTirePhoto(file) {
   }
 }
 
+// ---------- Realtime multi-device refresh ----------
+// Pure list merges for postgres_changes events. Upsert-by-id dedupes the
+// echo of this device's own optimistic writes, so no duplicates ever appear.
+export function mergeUpsert(list, row) {
+  if (!row || typeof row !== "object") return Array.isArray(list) ? list : [];
+  const prev = Array.isArray(list) ? list : [];
+  const id = row.id !== undefined && row.id !== null ? String(row.id) : "";
+  if (!id) return [...prev, row];
+  let found = false;
+  const next = prev.map((r) => {
+    if (r && String(r.id) === id) {
+      found = true;
+      return { ...r, ...row };
+    }
+    return r;
+  });
+  if (!found) next.push(row);
+  return next;
+}
+
+export function mergeRemove(list, id) {
+  if (id === undefined || id === null || id === "") return Array.isArray(list) ? list : [];
+  return (Array.isArray(list) ? list : []).filter((r) => !r || String(r.id) !== String(id));
+}
+
+// Subscribe to one table's inserts/updates/deletes for the current shop.
+// Returns an unsubscribe function. Safe to call when unconfigured (noop).
+// RLS applies server-side: the client only receives rows it may read.
+export function subscribeTable(key, handlers = {}) {
+  const noop = () => {};
+  if (!isSupabaseConfigured()) return noop;
+  const table = TABLE_MAP[key];
+  if (!table) return noop;
+  const shopId = getCurrentShopId();
+  try {
+    const filter = TENANT_TABLES.has(table) && shopId ? `shop_id=eq.${shopId}` : undefined;
+    const channel = supabase
+      .channel(`bw-${table}-${shopId || "shared"}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table,
+          ...(filter ? { filter } : {}),
+        },
+        (payload) => {
+          try {
+            if (!payload) return;
+            if (payload.eventType === "INSERT" && typeof handlers.onInsert === "function") {
+              handlers.onInsert(mapRowFromSupabase(table, payload.new));
+            } else if (payload.eventType === "UPDATE" && typeof handlers.onUpdate === "function") {
+              handlers.onUpdate(mapRowFromSupabase(table, payload.new));
+            } else if (
+              payload.eventType === "DELETE" &&
+              typeof handlers.onDelete === "function"
+            ) {
+              const gone = payload.old && payload.old.id;
+              if (gone !== undefined && gone !== null) handlers.onDelete(gone);
+            }
+          } catch (e) {
+            // a bad payload must never break the subscription
+          }
+        }
+      )
+      .subscribe();
+    return () => {
+      try {
+        supabase.removeChannel(channel);
+      } catch (e) {
+        // ignore
+      }
+    };
+  } catch (e) {
+    return noop;
+  }
+}
+

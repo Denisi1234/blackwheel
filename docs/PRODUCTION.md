@@ -67,6 +67,7 @@ There is no browser cache, so "lost" data is always one of these:
    Rows with `shop_id NULL` are invisible under RLS (`my_shop_ids()`). Backfill them to the correct shop with the SQL in `supabase/schema.sql:270-274`.
 3. **Inactive profile / email mismatch.** `select id, email, shop_id, role, active from profiles where lower(email) = lower('<login-email>');` — needs `active = true` and the right `shop_id`. Re-invites create a second profile row; strongest role wins per shop.
 4. **Shared devices / account switching.** Workspace state is cleared on sign-out and screens remount on shop change — account B never sees account A's data. Every screen writes straight to Supabase, so switching accounts is: sign out → sign in → cloud reloads in seconds.
+5. **Live multi-device refresh.** All 17 tables are in the `supabase_realtime` publication (`supabase/migrations/20261015000001_realtime.sql`); every screen subscribes with a `shop_id` filter and merges inserts/updates/deletes by id, so other devices see changes within seconds, no refresh. RLS still applies per client.
 
 ## 7. Ops notes / known limits
 

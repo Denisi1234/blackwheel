@@ -41,6 +41,9 @@ import {
   updateRow,
   deleteRow,
   newId,
+  subscribeTable,
+  mergeUpsert,
+  mergeRemove,
 } from "../lib/store";
 
 // Local component overrides only. Palette / mode come from the app-level
@@ -173,6 +176,29 @@ function TireHotel() {
       }
     };
     loadAll();
+  }, []);
+
+  // Realtime: hotel changes on other devices merge in live.
+  useEffect(() => {
+    const offs = [
+      ["hotelTires", setHotelTires],
+      ["hotelCustomers", setCustomers],
+    ].map(([key, set]) =>
+      subscribeTable(key, {
+        onInsert: (r) => set((p) => mergeUpsert(p, r)),
+        onUpdate: (r) => set((p) => mergeUpsert(p, r)),
+        onDelete: (id) => set((p) => mergeRemove(p, id)),
+      })
+    );
+    return () => {
+      offs.forEach((off) => {
+        try {
+          off();
+        } catch (e) {
+          // ignore
+        }
+      });
+    };
   }, []);
 
   useEffect(() => {

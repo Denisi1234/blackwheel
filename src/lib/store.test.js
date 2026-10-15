@@ -1,4 +1,4 @@
-import { newId, isUuid, isSupabaseConfigured, onSaveError, reportSaveError, insertRow } from "./store";
+import { newId, isUuid, isSupabaseConfigured, onSaveError, reportSaveError, insertRow, mergeUpsert, mergeRemove, subscribeTable } from "./store";
 
 test("newId generates unique string ids", () => {
   const a = newId();
@@ -49,4 +49,30 @@ test("unconfigured insert returns null without emitting", async () => {
   } finally {
     off();
   }
+});
+
+test("mergeUpsert adds new rows and merges known ids", () => {
+  const one = mergeUpsert([], { id: "a", stock: 1 });
+  expect(one).toEqual([{ id: "a", stock: 1 }]);
+  const two = mergeUpsert(one, { id: "b", stock: 2 });
+  expect(two.length).toBe(2);
+  const merged = mergeUpsert(two, { id: "a", stock: 5 });
+  expect(merged.length).toBe(2);
+  expect(merged.find((r) => r.id === "a").stock).toBe(5);
+  expect(mergeUpsert(null, null)).toEqual([]);
+});
+
+test("mergeRemove drops by id and tolerates junk", () => {
+  const list = [{ id: "a" }, { id: "b" }];
+  expect(mergeRemove(list, "a")).toEqual([{ id: "b" }]);
+  expect(mergeRemove(list, "zzz")).toEqual(list);
+  expect(mergeRemove(null, "a")).toEqual([]);
+  expect(mergeRemove(list)).toEqual(list);
+});
+
+test("subscribeTable is a safe noop when unconfigured", () => {
+  const off = subscribeTable("tires", { onInsert: () => { throw new Error("must not run"); } });
+  expect(typeof off).toBe("function");
+  expect(() => off()).not.toThrow();
+  expect(typeof subscribeTable("nope", {})).toBe("function");
 });

@@ -63,6 +63,9 @@ import {
   getCurrentShopId,
   setCurrentShopId,
   onSaveError,
+  subscribeTable,
+  mergeUpsert,
+  mergeRemove,
 } from "./lib/store";
 import {
   resolveShopMemberships,
@@ -517,6 +520,34 @@ const App = () => {
       return;
     }
     loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shop?.id]);
+
+  // Realtime: other devices' inserts/updates/deletes merge in live.
+  // Upsert-by-id dedupes our own optimistic writes, so no duplicates.
+  useEffect(() => {
+    if (!isSupabaseConfigured() || !shop?.id) return undefined;
+    const offs = [
+      ["tires", setTires],
+      ["sales", setSales],
+      ["inventory", setInventory],
+      ["deliveries", setDeliveries],
+    ].map(([key, set]) =>
+      subscribeTable(key, {
+        onInsert: (r) => set((p) => mergeUpsert(p, r)),
+        onUpdate: (r) => set((p) => mergeUpsert(p, r)),
+        onDelete: (id) => set((p) => mergeRemove(p, id)),
+      })
+    );
+    return () => {
+      offs.forEach((off) => {
+        try {
+          off();
+        } catch (e) {
+          // ignore
+        }
+      });
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shop?.id]);
 

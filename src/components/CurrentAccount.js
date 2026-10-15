@@ -90,6 +90,9 @@ import {
   newId,
   isUuid,
   isSupabaseConfigured,
+  subscribeTable,
+  mergeUpsert,
+  mergeRemove,
 } from "../lib/store";
 import { formatTireLabel } from "../lib/tireIdentity";
 import {
@@ -371,6 +374,30 @@ const CurrentAccount = ({ tires = [], sales = [], deliveries = [], user = null, 
 
     loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Realtime: ledger changes on other devices merge in live.
+  useEffect(() => {
+    const offs = [
+      ["accounts", setAccounts],
+      ["transactions", setTransactions],
+      ["invoices", setInvoices],
+    ].map(([key, set]) =>
+      subscribeTable(key, {
+        onInsert: (r) => set((p) => mergeUpsert(p, r)),
+        onUpdate: (r) => set((p) => mergeUpsert(p, r)),
+        onDelete: (id) => set((p) => mergeRemove(p, id)),
+      })
+    );
+    return () => {
+      offs.forEach((off) => {
+        try {
+          off();
+        } catch (e) {
+          // ignore
+        }
+      });
+    };
   }, []);
 
   const transactionsOf = (accountId) =>

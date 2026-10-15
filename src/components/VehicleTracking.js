@@ -23,6 +23,9 @@ import {
   deleteRow,
   newId,
   isUuid,
+  subscribeTable,
+  mergeUpsert,
+  mergeRemove,
 } from '../lib/store';
 import {
   paintHeader,
@@ -103,6 +106,47 @@ const VehicleTracking = () => {
             }
         };
         loadAll();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // Realtime: vehicle/service changes on other devices merge in live.
+    // Vehicles carry nested services, so service events fold into the
+    // owning vehicle instead of a flat list.
+    useEffect(() => {
+        const foldService = (rows, service, remove) =>
+            (Array.isArray(rows) ? rows : []).map((v) => {
+                if (!v || !Array.isArray(v.services)) return v;
+                const has = v.services.some((s) => s && String(s.id) === String(service?.id ?? service));
+                if (remove) {
+                    if (!has) return v;
+                    return { ...v, services: v.services.filter((s) => !s || String(s.id) !== String(service)) };
+                }
+                if (String(v.id) === String(service?.vehicleId)) {
+                    return { ...v, services: mergeUpsert(v.services, service) };
+                }
+                return has ? { ...v, services: mergeUpsert(v.services, service) } : v;
+            });
+        const offs = [
+            subscribeTable("vehicles", {
+                onInsert: (r) => setVehicles((p) => mergeUpsert(p, { ...r, services: r.services || [] })),
+                onUpdate: (r) => setVehicles((p) => mergeUpsert(p, r)),
+                onDelete: (id) => setVehicles((p) => mergeRemove(p, id)),
+            }),
+            subscribeTable("services", {
+                onInsert: (r) => setVehicles((p) => foldService(p, r, false)),
+                onUpdate: (r) => setVehicles((p) => foldService(p, r, false)),
+                onDelete: (id) => setVehicles((p) => foldService(p, id, true)),
+            }),
+        ];
+        return () => {
+            offs.forEach((off) => {
+                try {
+                    off();
+                } catch (e) {
+                    // ignore
+                }
+            });
+        };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 

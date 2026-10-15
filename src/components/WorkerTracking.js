@@ -53,7 +53,7 @@ import { jsPDF } from "jspdf";
 import "jspdf-autotable";
 import SuccessModal from "./SuccessModal";
 import { downloadCsv, datedName, paintHeader, paintFooter, moneyTable, fmtDate } from "../lib/documents";
-import { loadTable, insertRow, updateRow, deleteRow, newId, isUuid, isSupabaseConfigured } from "../lib/store";
+import { loadTable, insertRow, updateRow, deleteRow, newId, isUuid, isSupabaseConfigured, subscribeTable, mergeUpsert, mergeRemove } from "../lib/store";
 import { getWorkerPermissions } from "../lib/team";
 
 const TASK_TYPES = ["Removal", "Fitting", "Repair", "Maintenance", "Inspection"];
@@ -171,6 +171,29 @@ const WorkerTracking = ({ user = null, shop = null }) => {
       }
     };
     loadAll();
+  }, []);
+
+  // Realtime: worker/task changes on other devices merge in live.
+  useEffect(() => {
+    const offs = [
+      ["workers", setWorkers],
+      ["tasks", setTasks],
+    ].map(([key, set]) =>
+      subscribeTable(key, {
+        onInsert: (r) => set((p) => mergeUpsert(p, r)),
+        onUpdate: (r) => set((p) => mergeUpsert(p, r)),
+        onDelete: (id) => set((p) => mergeRemove(p, id)),
+      })
+    );
+    return () => {
+      offs.forEach((off) => {
+        try {
+          off();
+        } catch (e) {
+          // ignore
+        }
+      });
+    };
   }, []);
 
   const workerById = (id) => (workers || []).find((w) => String(w?.id) === String(id));

@@ -429,6 +429,27 @@ create policy "member_all" on public.shop_settings for all to authenticated
   with check (shop_id in (select public.my_shop_ids()));
 create index if not exists idx_shop_settings_shop on public.shop_settings(shop_id);
 
+-- ============ REALTIME (live multi-device refresh) ============
+-- Push row changes to connected devices; RLS still applies per client.
+alter publication supabase_realtime add table
+  public.tires,
+  public.sales,
+  public.inventory,
+  public.deliveries,
+  public.hotel_tires,
+  public.hotel_customers,
+  public.vehicles,
+  public.services,
+  public.workers,
+  public.tasks,
+  public.appointments,
+  public.accounts,
+  public.transactions,
+  public.invoices,
+  public.profiles,
+  public.shops,
+  public.shop_settings;
+
 -- ============ STORAGE (tire photos) ============
 -- Run once: create bucket 'tire-photos' (public or private) in Dashboard > Storage,
 -- or via API. Example SQL for storage.objects policies (adjust to private as needed):
