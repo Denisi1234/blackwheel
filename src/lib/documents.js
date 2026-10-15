@@ -2,8 +2,9 @@
 // Company header (from Settings), navy styling, footers with page numbers,
 // BOM-safe CSV and column-fitted Excel exports.
 import "jspdf-autotable";
+import { jsPDF } from "jspdf";
 import * as XLSX from "xlsx";
-import { getCompany, formatMoney } from "./settings";
+import { getCompany, formatMoney, getVatRate, getCurrency } from "./settings";
 import { getAppLang } from "../components/i18n";
 
 export const DOC_BRAND = {
@@ -218,4 +219,57 @@ export function downloadExcel(filename, sheetName, rows, colWidths = []) {
 
 export function datedName(base, ext) {
   return `${base}_${todayStamp()}.${ext}`;
+}
+
+// One-page sale receipt PDF: customer, tire line, VAT totals, signatures.
+// Same visual identity as the hotel receipt (paintHeader/moneyTable/paintFooter).
+export function downloadSaleReceipt(sale = {}, tire = {}) {
+  const doc = new jsPDF();
+  const cur = sale.currency || tire.currency || getCurrency();
+  const qty = Number(sale.quantity) || 0;
+  const unit = Number(sale.price) || 0;
+  const subtotal = qty * unit;
+  const vatRate = getVatRate();
+  const vat = (subtotal * vatRate) / 100;
+  const total = subtotal + vat;
+  const refNo = `RCPT-${String(sale.date || todayStamp()).slice(0, 10)}-${String(sale.id || "").slice(0, 8).toUpperCase()}`;
+  const startY = paintHeader(doc, { title: "Sale Receipt", refNo });
+
+  let y = sectionCaption(doc, "Customer", startY);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(12);
+  doc.setTextColor(15, 23, 42);
+  doc.text(String(sale.customerName || "Walk-in customer").slice(0, 48), 14, y + 1);
+  y = metaLine(doc, "Date", fmtDate(sale.date) || todayStamp(), 14, y + 8);
+  y = metaLine(doc, "Currency", cur, 110, y - 10);
+
+  y = sectionCaption(doc, "Items", y + 4);
+  const label = [tire.brand, tire.size, tire.year].filter(Boolean).join(" ").slice(0, 42) || "Tire";
+  y = moneyTable(
+    doc,
+    {
+      startY: y,
+      head: [["Tire", "Qty", "Unit price", "Total"]],
+      body: [[label, String(qty), money(unit, cur), money(subtotal, cur)]],
+      foot: [
+        ["", "", "Subtotal", money(subtotal, cur)],
+        ["", "", `VAT (${vatRate}%)`, money(vat, cur)],
+        ["", "", "TOTAL", money(total, cur)],
+      ],
+      moneyCols: [1, 2, 3],
+    }
+  );
+
+  y += 16;
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(10);
+  doc.setTextColor(15, 23, 42);
+  doc.text("Customer signature", 14, y);
+  doc.text("Staff signature", 110, y);
+  doc.setDrawColor(...DOC_BRAND.muted);
+  doc.line(14, y + 12, 90, y + 12);
+  doc.line(110, y + 12, 186, y + 12);
+
+  paintFooter(doc, `Sale receipt ${String(sale.customerName || "").slice(0, 40)}`);
+  doc.save(datedName("sale_receipt", "pdf"));
 }

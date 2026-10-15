@@ -2,9 +2,10 @@ import React, { useState } from 'react';
 import { TextField, Button, Grid, Paper, Typography, Select, MenuItem, FormControl, InputLabel, Box, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Paper as TablePaper, Dialog, DialogTitle, DialogContent, IconButton, CircularProgress, TablePagination } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import DeleteIcon from '@mui/icons-material/Delete';
+import ReceiptIcon from '@mui/icons-material/Receipt';
 import SuccessModal from './SuccessModal';
 import { formatTireLabel } from '../lib/tireIdentity';
-import { downloadExcel, datedName, money } from '../lib/documents';
+import { downloadExcel, datedName, money, downloadSaleReceipt } from '../lib/documents';
 import { getCurrency } from '../lib/settings';
 
 function SaleForm(props) {
@@ -27,6 +28,7 @@ function SaleForm(props) {
   const [isSaving, setIsSaving] = useState(false);
   const [successOpen, setSuccessOpen] = useState(false);
   const [successData, setSuccessData] = useState({ title: '', message: '', details: [] });
+  const [lastSale, setLastSale] = useState(null);
   const [histPage, setHistPage] = useState(0);
   const [histRowsPerPage, setHistRowsPerPage] = useState(10);
 
@@ -104,11 +106,14 @@ function SaleForm(props) {
     };
     setIsSaving(true);
     setTimeout(() => {
+      let savedId = null;
       if (typeof addSale === 'function') {
-        addSale(coercedSale);
+        const res = addSale(coercedSale);
+        if (res !== false) savedId = typeof res === 'string' ? res : coercedSale.id || null;
       } else {
         setLocalHistory((prev) => [...(prev || []), coercedSale]);
       }
+      setLastSale({ ...coercedSale, id: savedId || coercedSale.id || null });
       setSale({ tireId: '', quantity: '', price: '', date: '', customerName: '' });
       setIsSaving(false);
       const tireLabel = formatTireLabel(selectedTire);
@@ -128,6 +133,17 @@ function SaleForm(props) {
 
   const handleOpenHistory = () => setOpenHistory(true);
   const handleCloseHistory = () => setOpenHistory(false);
+
+  // Shared receipt printer: finds the tire for the row (or blanks).
+  const printReceiptFor = (record) => {
+    if (!record) return;
+    const tire = (tires || []).find((t) => String(t?.id) === String(record?.tireId)) || {};
+    try {
+      downloadSaleReceipt(record, tire);
+    } catch (e) {
+      setError('Could not generate the receipt. See console for details.');
+    }
+  };
 
   const handleVoidSale = (saleItem) => {
     if (typeof onDeleteSale !== 'function') {
@@ -324,6 +340,15 @@ function SaleForm(props) {
                         <TableCell>{saleItem?.price ?? ''}</TableCell>
                         <TableCell>
                           <IconButton
+                            aria-label="print receipt"
+                            size="small"
+                            color="primary"
+                            title="Print receipt (PDF)"
+                            onClick={() => printReceiptFor(saleItem)}
+                          >
+                            <ReceiptIcon fontSize="small" />
+                          </IconButton>
+                          <IconButton
                             aria-label="void sale"
                             size="small"
                             color="error"
@@ -361,7 +386,11 @@ function SaleForm(props) {
         title={successData.title || 'Sale Recorded'}
         message={successData.message}
         details={successData.details}
-        actionLabel="Done"
+        actionLabel="Print receipt"
+        onAction={() => {
+          if (lastSale) printReceiptFor(lastSale);
+          setSuccessOpen(false);
+        }}
       />
     </div>
   );

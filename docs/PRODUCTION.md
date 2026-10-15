@@ -51,6 +51,7 @@ kubectl -n blackwheel rollout status deploy/blackwheel-web
 - [ ] WorkerTracking as `Sales` shows read-only banner; as `Technician` can complete tasks.
 - [ ] Team invite auto-creates the worker row (and worker email invites the login) — one person, one record, matched by email; "My tasks" filter shows the login user's tasks.
 - [ ] Export CSV/PDF from TireList, Deliveries, WorkerTracking.
+- [ ] Sale receipt PDF downloads from SaleForm history and the post-sale dialog.
 - [ ] Change currency/threshold in Settings, refresh: values persist from the cloud.
 - [ ] Dark toggle + 360px mobile pass on TireHotel charts, dialogs, tables.
 
