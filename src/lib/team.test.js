@@ -1,4 +1,4 @@
-import { TEAM_ROLES, INVITE_ROLES, getWorkerPermissions, isInviteRole, personalShopName, roleToPosition, positionToInviteRole, sameEmail } from "./team";
+import { TEAM_ROLES, INVITE_ROLES, getWorkerPermissions, isInviteRole, personalShopName, roleToPosition, positionToInviteRole, sameEmail, findRosterGaps } from "./team";
 
 test("team roles include all four, invites exclude Admin", () => {
   expect(TEAM_ROLES).toEqual(expect.arrayContaining(["Admin", "Technician", "Sales", "Staff"]));
@@ -84,4 +84,14 @@ test("sameEmail matches case-insensitively and rejects blanks", () => {
   expect(sameEmail("a@x.com", "b@x.com")).toBe(false);
   expect(sameEmail("", "a@x.com")).toBe(false);
   expect(sameEmail(null, null)).toBe(false);
+});
+
+test("findRosterGaps spots missing links both ways", () => {
+  const profiles = [{ email: "a@x.com" }, { email: "B@x.com" }];
+  const workers = [{ email: "b@x.com" }, { email: "c@x.com" }];
+  const gaps = findRosterGaps(profiles, workers);
+  expect(gaps.profilesWithoutWorker.map((p) => p.email)).toEqual(["a@x.com"]);
+  expect(gaps.workersWithoutProfile.map((w) => w.email)).toEqual(["c@x.com"]);
+  expect(findRosterGaps([], []).profilesWithoutWorker).toEqual([]);
+  expect(findRosterGaps(null, null).workersWithoutProfile).toEqual([]);
 });

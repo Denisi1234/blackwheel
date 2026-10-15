@@ -41,7 +41,7 @@ import {
   mergeUpsert,
   mergeRemove,
 } from '../lib/store';
-import { TEAM_ROLES, INVITE_ROLES, roleToPosition, sameEmail } from '../lib/team';
+import { TEAM_ROLES, INVITE_ROLES, roleToPosition, sameEmail, findRosterGaps } from '../lib/team';
 import { getAppLang } from './i18n';
 
 const STR = {
@@ -135,23 +135,61 @@ function TeamManagement({ shop = null, currentUser = null }) {
   const [form, setForm] = useState({ name: '', email: '', role: 'Sales' });
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(10);
+  const [gapCount, setGapCount] = useState(0);
+  const [repairing, setRepairing] = useState(false);
   const loadedRef = useRef(false);
+  const repairedRef = useRef('');
   const t = STR[getAppLang()] || STR.en;
+
+  // One person, one record: backfill worker roster rows for team logins
+  // that predate the link (or were created on an old frontend). Best-effort,
+  // once per shop — never blocks the team list.
+  const repairGaps = async (list, isAdminView) => {
+    if (!isAdminView) return;
+    try {
+      const remoteWorkers = await loadTable('workers');
+      if (remoteWorkers === null) return;
+      const { profilesWithoutWorker } = findRosterGaps(list, remoteWorkers || []);
+      setGapCount(profilesWithoutWorker.length);
+      if (profilesWithoutWorker.length === 0) return;
+      const key = `${shopId}:${profilesWithoutWorker.map((p) => String(p?.email || '').toLowerCase()).sort().join(',')}`;
+      if (repairedRef.current === key || repairing) return;
+      repairedRef.current = key;
+      setRepairing(true);
+      let created = 0;
+      for (const p of profilesWithoutWorker) {
+        try {
+          const saved = await insertRow('workers', {
+            id: newId(),
+            name: p?.name || String(p?.email || '').split('@')[0],
+            email: String(p?.email || '').toLowerCase(),
+            position: roleToPosition(p?.role),
+            contact: '',
+          });
+          if (saved) created += 1;
+        } catch (e) {
+          // ignore — next login retries
+        }
+      }
+      setGapCount(Math.max(0, profilesWithoutWorker.length - created));
+      if (created > 0) showMsg(setInfo, `${created} worker row(s) restored from team emails.`);
+    } catch (e) {
+      // ignore — repair never blocks the team list
+    } finally {
+      setRepairing(false);
+    }
+  };
 
   useEffect(() => {
     const loadAll = async () => {
       setLoading(true);
       try {
         const remote = await loadTable('profiles');
-        if (remote !== null) {
-          setProfiles(
-            shopId
-              ? (remote || []).filter((p) => String(p?.shopId) === String(shopId))
-              : remote || []
-          );
-        } else {
-          setProfiles([]);
-        }
+        const list = remote !== null
+          ? (shopId ? (remote || []).filter((p) => String(p?.shopId) === String(shopId)) : remote || [])
+          : [];
+        setProfiles(list);
+        repairGaps(list, isAdmin);
       } catch (e) {
         setProfiles([]);
       } finally {
@@ -272,6 +310,22 @@ function TeamManagement({ shop = null, currentUser = null }) {
     }
     if (!TEAM_ROLES.includes(nextRole)) return;
     patchProfile(id, { role: nextRole });
+    // Keep the worker roster in sync: role doubles as position.
+    // Best-effort — the team role is already saved above.
+    (async () => {
+      try {
+        const row = findRow(id);
+        const email = String(row?.email || '').toLowerCase();
+        if (!email) return;
+        const remoteWorkers = await loadTable('workers');
+        const match = (remoteWorkers || []).find((w) => sameEmail(w?.email, email));
+        if (match && match.position !== roleToPosition(nextRole)) {
+          await updateRow('workers', match.id, { position: roleToPosition(nextRole) });
+        }
+      } catch (e) {
+        // ignore
+      }
+    })();
   };
 
   const handleActiveToggle = (row) => {
@@ -331,6 +385,29 @@ function TeamManagement({ shop = null, currentUser = null }) {
             </Button>
           </Box>
         </Paper>
+      )}
+
+      {isAdmin && gapCount > 0 && (
+        <Alert
+          severity="warning"
+          sx={{ mb: 2, borderRadius: 1 }}
+          action={
+            <Button
+              size="small"
+              variant="outlined"
+              disabled={repairing}
+              onClick={() => {
+                repairedRef.current = '';
+                repairGaps(profiles, true);
+              }}
+              sx={{ textTransform: 'none', fontWeight: 700 }}
+            >
+              {repairing ? 'Syncing…' : `Sync ${gapCount} to workers`}
+            </Button>
+          }
+        >
+          {gapCount} team member(s) have no worker row — tasks cannot be assigned to them until synced.
+        </Alert>
       )}
 
       <TableContainer component={Paper} sx={{ overflowX: "auto" }}>

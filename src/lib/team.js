@@ -220,3 +220,32 @@ export function sameEmail(a, b) {
   const y = String(b || "").trim().toLowerCase();
   return Boolean(x) && x === y;
 }
+
+// Roster repair: team logins (profiles) and worker rows are one person, one
+// record, matched by email. Invites created before the link (or on old
+// frontends) never got their counterpart row, so the two screens drift.
+// Pure (unit-tested): returns the gaps so UIs can backfill them.
+export function findRosterGaps(profiles, workers) {
+  const profs = Array.isArray(profiles) ? profiles : [];
+  const works = Array.isArray(workers) ? workers : [];
+  const emailsOf = (list) => {
+    const s = new Set();
+    list.forEach((r) => {
+      const e = String(r?.email || "").trim().toLowerCase();
+      if (e) s.add(e);
+    });
+    return s;
+  };
+  const workerEmails = emailsOf(works);
+  const profileEmails = emailsOf(profs);
+  return {
+    profilesWithoutWorker: profs.filter((p) => {
+      const e = String(p?.email || "").trim().toLowerCase();
+      return e && !workerEmails.has(e);
+    }),
+    workersWithoutProfile: works.filter((w) => {
+      const e = String(w?.email || "").trim().toLowerCase();
+      return e && !profileEmails.has(e);
+    }),
+  };
+}
