@@ -147,8 +147,10 @@ create table if not exists public.workers (
   name text not null,
   position text,
   contact text,
+  email text,
   created_at timestamptz not null default now()
 );
+create index if not exists idx_workers_email on public.workers(email);
 
 create table if not exists public.tasks (
   id uuid primary key default gen_random_uuid(),

@@ -1,4 +1,4 @@
-import { TEAM_ROLES, INVITE_ROLES, getWorkerPermissions, isInviteRole, personalShopName } from "./team";
+import { TEAM_ROLES, INVITE_ROLES, getWorkerPermissions, isInviteRole, personalShopName, roleToPosition, positionToInviteRole, sameEmail } from "./team";
 
 test("team roles include all four, invites exclude Admin", () => {
   expect(TEAM_ROLES).toEqual(expect.arrayContaining(["Admin", "Technician", "Sales", "Staff"]));
@@ -63,4 +63,25 @@ test("personal shop name passes the demo-name guard", () => {
 
 test("personal shop name is capped at 60 chars", () => {
   expect(personalShopName("A".repeat(100), "x@y.com").length).toBeLessThanOrEqual(60);
+});
+
+test("roles double as worker positions", () => {
+  expect(roleToPosition("Technician")).toBe("Technician");
+  expect(roleToPosition("Sales")).toBe("Sales");
+  expect(roleToPosition("Admin")).toBe("Staff");
+  expect(roleToPosition("")).toBe("Staff");
+});
+
+test("positions map back to invite roles", () => {
+  expect(positionToInviteRole("Tire technician")).toBe("Technician");
+  expect(positionToInviteRole("Sales lead")).toBe("Sales");
+  expect(positionToInviteRole("Tire fitter")).toBe("Staff");
+  expect(positionToInviteRole("")).toBe("Staff");
+});
+
+test("sameEmail matches case-insensitively and rejects blanks", () => {
+  expect(sameEmail("John@Shop.com", "john@shop.com")).toBe(true);
+  expect(sameEmail("a@x.com", "b@x.com")).toBe(false);
+  expect(sameEmail("", "a@x.com")).toBe(false);
+  expect(sameEmail(null, null)).toBe(false);
 });

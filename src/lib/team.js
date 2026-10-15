@@ -201,3 +201,22 @@ export function getWorkerPermissions(role, isOnline = true) {
 export function isInviteRole(role) {
   return INVITE_ROLES.includes(role);
 }
+
+// One person, one record: team logins and worker roster rows are matched by
+// email. Invite roles double as worker positions.
+export function roleToPosition(role) {
+  return INVITE_ROLES.includes(role) ? role : "Staff";
+}
+
+export function positionToInviteRole(position) {
+  const p = String(position || "").toLowerCase();
+  if (p.includes("tech")) return "Technician";
+  if (p.includes("sale")) return "Sales";
+  return "Staff";
+}
+
+export function sameEmail(a, b) {
+  const x = String(a || "").trim().toLowerCase();
+  const y = String(b || "").trim().toLowerCase();
+  return Boolean(x) && x === y;
+}

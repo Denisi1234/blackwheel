@@ -54,7 +54,7 @@ import "jspdf-autotable";
 import SuccessModal from "./SuccessModal";
 import { downloadCsv, datedName, paintHeader, paintFooter, moneyTable, fmtDate } from "../lib/documents";
 import { loadTable, insertRow, updateRow, deleteRow, newId, isUuid, isSupabaseConfigured, subscribeTable, mergeUpsert, mergeRemove } from "../lib/store";
-import { getWorkerPermissions } from "../lib/team";
+import { getWorkerPermissions, sameEmail } from "../lib/team";
 
 const TASK_TYPES = ["Removal", "Fitting", "Repair", "Maintenance", "Inspection"];
 const STATUSES = ["In Progress", "Completed", "Cancelled"];
@@ -125,10 +125,11 @@ const WorkerTracking = ({ user = null, shop = null }) => {
   const [statusFilter, setStatusFilter] = useState("All");
   const [workerFilter, setWorkerFilter] = useState("All");
   const [dateFilter, setDateFilter] = useState("All");
+  const [mineOnly, setMineOnly] = useState(false);
 
   const [workerDialog, setWorkerDialog] = useState(false);
   const [editingWorker, setEditingWorker] = useState(null);
-  const [workerForm, setWorkerForm] = useState({ name: "", position: "", contact: "" });
+  const [workerForm, setWorkerForm] = useState({ name: "", position: "", contact: "", email: "", role: "Staff" });
 
   const [taskDialog, setTaskDialog] = useState(false);
   const [editingTask, setEditingTask] = useState(null);
@@ -235,6 +236,13 @@ const WorkerTracking = ({ user = null, shop = null }) => {
     }
     if (statusFilter !== "All") list = list.filter((t) => t.status === statusFilter);
     if (workerFilter !== "All") list = list.filter((t) => String(t.workerId) === String(workerFilter));
+    // My tasks: workers are linked to logins by email.
+    if (mineOnly) {
+      const me = String(user?.email || "").trim().toLowerCase();
+      list = me
+        ? list.filter((t) => sameEmail(workerById(t.workerId)?.email, me))
+        : [];
+    }
     if (dateFilter !== "All") {
       list = list.filter((t) => {
         const d = safeDate(t.date);
@@ -248,11 +256,11 @@ const WorkerTracking = ({ user = null, shop = null }) => {
     list.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")) || String(b.time || "").localeCompare(String(a.time || "")));
     return list;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tasks, workers, searchText, statusFilter, workerFilter, dateFilter]);
+  }, [tasks, workers, searchText, statusFilter, workerFilter, dateFilter, mineOnly]);
 
   useEffect(() => {
     setPage(0);
-  }, [searchText, statusFilter, workerFilter, dateFilter]);
+  }, [searchText, statusFilter, workerFilter, dateFilter, mineOnly]);
 
   const pagedTasks = useMemo(() => {
     const start = page * rowsPerPage;
@@ -266,7 +274,7 @@ const WorkerTracking = ({ user = null, shop = null }) => {
       return;
     }
     setEditingWorker(null);
-    setWorkerForm({ name: "", position: "", contact: "" });
+    setWorkerForm({ name: "", position: "", contact: "", email: "", role: "Staff" });
     setWorkerDialog(true);
   };
 
@@ -276,8 +284,35 @@ const WorkerTracking = ({ user = null, shop = null }) => {
       return;
     }
     setEditingWorker(w);
-    setWorkerForm({ name: w.name || "", position: w.position || "", contact: w.contact || "" });
+    setWorkerForm({ name: w.name || "", position: w.position || "", contact: w.contact || "", email: w.email || "", role: "Staff" });
     setWorkerDialog(true);
+  };
+
+  // Reverse link: a worker email can also invite the team login, so one
+  // person stays one record whichever screen created them first.
+  // Returns "invited" | "exists" | "none".
+  const ensureTeamInvite = async (name, email, role) => {
+    if (!email || !email.includes("@")) return "none";
+    if (!isSupabaseConfigured()) return "none";
+    try {
+      const existing = await loadTable("profiles");
+      if ((existing || []).some((p) => sameEmail(p?.email, email))) return "exists";
+      const shopId = shop?.id || "";
+      if (!shopId) return "none";
+      await insertRow("profiles", {
+        id: newId(),
+        shopId,
+        shop_name: shop?.name || "",
+        email,
+        name: name || email.split("@")[0],
+        role: ["Technician", "Sales", "Staff"].includes(role) ? role : "Staff",
+        invited: true,
+        active: true,
+      });
+      return "invited";
+    } catch (e) {
+      return "none";
+    }
   };
 
   const saveWorker = () => {
@@ -288,22 +323,35 @@ const WorkerTracking = ({ user = null, shop = null }) => {
     const name = workerForm.name.trim();
     const position = workerForm.position.trim();
     const contact = workerForm.contact.trim();
+    const email = workerForm.email.trim().toLowerCase();
+    const role = workerForm.role || "Staff";
     if (!name || !position || !contact) {
       showSnackbar("Please fill name, position and contact.", "error");
       return;
     }
+    if (email && !email.includes("@")) {
+      showSnackbar("Email looks invalid — fix it or leave it empty.", "error");
+      return;
+    }
     if (editingWorker) {
-      const patch = { name, position, contact };
+      const patch = { name, position, contact, email };
       setWorkers((prev) => (prev || []).map((w) => (String(w?.id) === String(editingWorker.id) ? { ...w, ...patch } : w)));
       updateRow("workers", editingWorker.id, patch);
       showSnackbar("Worker updated.", "success");
       setSuccessModal({ open: true, title: "Worker Updated", message: "Worker information updated.", details: [{ label: "Name", value: name }, { label: "Position", value: position }] });
+      ensureTeamInvite(name, email, role).then((res) => {
+        if (res === "invited") showSnackbar(`Team invite sent to ${email}.`, "success");
+      });
     } else {
-      const rec = { id: newId(), name, position, contact };
+      const rec = { id: newId(), name, position, contact, email };
       setWorkers((prev) => [...(prev || []), rec]);
       insertRow("workers", rec);
       showSnackbar("Worker added.", "success");
       setSuccessModal({ open: true, title: "Worker Added", message: "New worker added.", details: [{ label: "Name", value: name }, { label: "Position", value: position }] });
+      ensureTeamInvite(name, email, role).then((res) => {
+        if (res === "invited") showSnackbar(`Team invite sent to ${email} — one record for login and tasks.`, "success");
+        else if (res === "exists") showSnackbar("Already on the team — linked by email.", "info");
+      });
     }
     setWorkerDialog(false);
   };
@@ -478,6 +526,7 @@ const WorkerTracking = ({ user = null, shop = null }) => {
     setStatusFilter("All");
     setWorkerFilter("All");
     setDateFilter("All");
+    setMineOnly(false);
   };
 
   return (
@@ -567,7 +616,15 @@ const WorkerTracking = ({ user = null, shop = null }) => {
 
         <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 1, mb: 1 }}>
           <Typography variant="h6">Tasks ({filteredTasks.length})</Typography>
-          <Box sx={{ display: "flex", gap: 1 }}>
+          <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+            <Chip
+              size="small"
+              label="My tasks"
+              clickable
+              color={mineOnly ? "primary" : "default"}
+              variant={mineOnly ? "filled" : "outlined"}
+              onClick={() => setMineOnly((v) => !v)}
+            />
             <Button size="small" variant="outlined" startIcon={<Download />} onClick={exportCSV}>CSV</Button>
             <Button size="small" variant="outlined" startIcon={<Download />} onClick={exportPDF}>PDF</Button>
           </Box>
@@ -679,6 +736,15 @@ const WorkerTracking = ({ user = null, shop = null }) => {
             <TextField label="Full name" value={workerForm.name} onChange={(e) => setWorkerForm({ ...workerForm, name: e.target.value })} fullWidth autoFocus />
             <TextField label="Position (e.g. Tire fitter)" value={workerForm.position} onChange={(e) => setWorkerForm({ ...workerForm, position: e.target.value })} fullWidth />
             <TextField label="Contact (phone)" value={workerForm.contact} onChange={(e) => setWorkerForm({ ...workerForm, contact: e.target.value })} fullWidth />
+            <TextField label="Email (optional — also invites to team login)" type="email" value={workerForm.email} onChange={(e) => setWorkerForm({ ...workerForm, email: e.target.value })} fullWidth />
+            {workerForm.email.trim() && (
+              <FormControl fullWidth>
+                <InputLabel>Team role for the invite</InputLabel>
+                <Select value={workerForm.role} label="Team role for the invite" onChange={(e) => setWorkerForm({ ...workerForm, role: e.target.value })}>
+                  {["Technician", "Sales", "Staff"].map((r) => (<MenuItem key={r} value={r}>{r}</MenuItem>))}
+                </Select>
+              </FormControl>
+            )}
           </DialogContent>
           <DialogActions>
             <Button onClick={() => setWorkerDialog(false)}>Cancel</Button>

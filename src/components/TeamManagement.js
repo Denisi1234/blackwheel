@@ -41,7 +41,7 @@ import {
   mergeUpsert,
   mergeRemove,
 } from '../lib/store';
-import { TEAM_ROLES, INVITE_ROLES } from '../lib/team';
+import { TEAM_ROLES, INVITE_ROLES, roleToPosition, sameEmail } from '../lib/team';
 import { getAppLang } from './i18n';
 
 const STR = {
@@ -230,6 +230,24 @@ function TeamManagement({ shop = null, currentUser = null }) {
       };
       setProfiles((prev) => [...(prev || []), record]);
       await insertRow('profiles', record);
+      // One person, one record: the invite also creates the worker roster
+      // row (matched later by email) so tasks can be assigned immediately.
+      // Best-effort — the invite itself is already saved above.
+      try {
+        const existingWorkers = await loadTable('workers');
+        const dup = (existingWorkers || []).some((w) => sameEmail(w?.email, email));
+        if (!dup) {
+          await insertRow('workers', {
+            id: newId(),
+            name,
+            email,
+            position: roleToPosition(record.role),
+            contact: '',
+          });
+        }
+      } catch (e) {
+        // ignore — roster sync never blocks the invite
+      }
       setForm({ name: '', email: '', role: 'Sales' });
       showMsg(setInfo, t.invitedAs(name, roleLabel(t, record.role), email));
     } finally {
